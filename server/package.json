@@ -1,0 +1,18 @@
+{
+  "name": "docscan-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "찰칵장부 API 서버 (Express + PostgreSQL)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js",
+    "dev": "node --env-file=.env --watch server.js"
+  },
+  "engines": {
+    "node": ">=20.6"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "pg": "8.13.1"
+  }
+}

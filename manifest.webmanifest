@@ -1,0 +1,23 @@
+{
+  "name": "찰칵장부 — 고지서·명세서 자동 입력",
+  "short_name": "찰칵장부",
+  "description": "고지서, 지로, 거래명세서를 촬영하면 내용을 읽어 자동으로 저장합니다.",
+  "id": "/",
+  "start_url": "/#/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "lang": "ko",
+  "background_color": "#f4f5f7",
+  "theme_color": "#2563eb",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "문서 촬영", "url": "/#/camera", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "검수함", "url": "/#/queue", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

@@ -1,0 +1,27 @@
+# Render 블루프린트: GitHub 저장소를 연결하면 웹 서비스와 PostgreSQL이 함께 만들어진다.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: chalkak
+    runtime: docker
+    plan: free            # 무료: 15분 미사용 시 잠들고, 첫 접속 때 30초~1분 깨어남
+    region: singapore     # 한국에서 가장 가까운 리전
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chalkak-db
+          property: connectionString
+      - key: SIGNUP_CODE   # 아는 사람만 가입하도록 초대 코드 (Render가 처음에 입력을 요청)
+        sync: false
+
+databases:
+  - name: chalkak-db
+    plan: free            # 무료 DB는 30일 후 만료 — 계속 쓰려면 유료 플랜(basic-256mb 등)으로 변경
+    region: singapore
+    databaseName: docscan
+    user: docscan
+    postgresMajorVersion: "16"
+    ipAllowList: []       # 외부 접속 차단, Render 내부에서만 접근

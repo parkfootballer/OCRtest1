@@ -1,0 +1,9 @@
+**/node_modules
+server/.env
+server/.pg-superuser
+server/uploads
+server/start.ps1
+tools
+.claude
+.git
+*.md
