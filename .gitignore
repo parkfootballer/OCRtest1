@@ -3,3 +3,8 @@ server/uploads/
 server/.env
 server/.pg-superuser
 .claude/
+tools/eval/node_modules/
+tools/eval/cache/
+tools/eval/results/
+tools/eval/*.log
+tools/eval/*.traineddata

@@ -1,16 +1,16 @@
 // 서비스 워커: 앱 셸은 미리 캐시해 즉시 열리게 하고, OCR 엔진·한국어 모델(CDN)은 한 번 받으면 재사용한다.
 // 앱 파일을 바꿨다면 VERSION을 올려야 휴대폰에 새 버전이 반영된다.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL = `shell-${VERSION}`;
-const OCR_CACHE = 'ocr-assets-v1';
+const OCR_CACHE = 'ocr-assets-v2'; // v2: Tesseract → PaddleOCR 모델(/models/)
 
 const SHELL_FILES = [
   '/', '/index.html', '/manifest.webmanifest',
   '/css/style.css',
-  '/js/db.js', '/js/parser.js', '/js/ocr.js', '/js/samples.js', '/js/app.js',
+  '/js/paddle.js', '/js/db.js', '/js/parser.js', '/js/ocr.js', '/js/samples.js', '/js/app.js',
   '/icons/icon-192.png', '/icons/apple-touch-icon.png', '/icons/favicon-32.png',
 ];
-const OCR_HOSTS = ['cdn.jsdelivr.net', 'unpkg.com', 'tessdata.projectnaptha.com'];
+const OCR_HOSTS = ['cdn.jsdelivr.net'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
@@ -19,7 +19,7 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     for (const k of await caches.keys()) {
-      if (k.startsWith('shell-') && k !== SHELL) await caches.delete(k);
+      if (k !== SHELL && k !== OCR_CACHE) await caches.delete(k);
     }
     await self.clients.claim();
   })());
@@ -34,7 +34,7 @@ self.addEventListener('fetch', (e) => {
   if (url.origin === location.origin && url.pathname.startsWith('/api/')) return;
 
   // OCR 엔진·언어 데이터: 캐시 우선 (용량이 커서 매번 받지 않는다)
-  if (OCR_HOSTS.includes(url.hostname)) {
+  if (OCR_HOSTS.includes(url.hostname) || (url.origin === location.origin && url.pathname.startsWith('/models/'))) {
     e.respondWith(caches.open(OCR_CACHE).then(async (c) => {
       const hit = await c.match(req);
       if (hit) return hit;

@@ -19,8 +19,13 @@
     ['dueDate', '납부기한', 'date'],
     ['totalAmount', '합계 금액', 'money'],
     ['taxAmount', '세액', 'money'],
+    ['customerName', '고객명(공급받는자)', 'text'],
+    ['billingMonth', '청구년월', 'month'],
   ];
   const AUTO_VERIFY_SCORE = 0.85;
+  // 수량·단가가 모두 있을 때만 수량×단가=금액을 따진다 (고지서 항목은 금액만 있음)
+  const itemMismatch = (it) => it.quantity != null && it.quantity !== '' && it.unitPrice != null && it.unitPrice !== ''
+    && Math.abs((+it.quantity) * (+it.unitPrice) - (+it.amount || 0)) > 1;
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const h = (html) => { $view.innerHTML = html; $view.scrollTop = 0; };
@@ -98,6 +103,7 @@
     const retakeId = params.get('retake');
     let docType = params.get('type') || 'auto';
     document.body.classList.add('dark');
+    OCR.warmup(); // 촬영하는 동안 인식 모델을 미리 받아 둔다
     h(`
       <div class="camera">
         <video id="video" playsinline muted autoplay></video>
@@ -196,7 +202,7 @@
         <div class="scan"><img src="${doc.imageUrl}" alt=""><div class="beam"></div></div>
         <ol class="steps">${steps.map((s, i) => `<li data-i="${i}"><span class="dot"></span>${s}<em></em></li>`).join('')}</ol>
         <div class="bar"><div id="bar"></div></div>
-        <p class="muted" id="procMsg">처음 실행 시 한국어 인식 모델(약 10MB)을 내려받습니다.</p>
+        <p class="muted" id="procMsg">처음 실행 시 한국어 인식 모델(약 16MB)을 내려받습니다.</p>
       </div>
     `);
     const step = (i, state, note = '') => {
@@ -215,15 +221,18 @@
 
       step(1, 'active');
       const ocr = await OCR.recognize(doc.imageUrl, (m) => {
-        if (m.status === 'recognizing text') bar(0.15 + m.progress * 0.7);
+        if (m.status === '글자 인식 중') bar(0.15 + m.progress * 0.7);
         const msg = document.getElementById('procMsg');
         if (msg && m.status) msg.textContent = `${m.status}${m.progress ? ` ${Math.round(m.progress * 100)}%` : ''}`;
       });
       step(1, 'done', `${Math.round(ocr.confidence)}%`);
+      // 옆으로·거꾸로 찍힌 사진은 바로 세워서 다시 저장
+      if (ocr.rotation) await DB.setStatus(id, 'processing', { imageUrl: await OCR.rotateDataUrl(doc.imageUrl, ocr.rotation) });
 
       step(2, 'active');
       const typeHint = doc.documentType;
-      const parsed = Parser.parse(ocr, typeHint);
+      const memory = await DB.memory().catch(() => ({})); // 이전에 검수 확정한 상호·고객명
+      const parsed = Parser.parse(ocr, typeHint, memory);
       if (q.issues.length) parsed.data.qualityIssues = q.issues;
       await DB.saveExtraction(id, parsed.data, parsed.lineItems);
       step(2, 'done', `${parsed.lineItems.length}개 품목`);
@@ -321,7 +330,7 @@
         <label class="field ${st ? st.level : ''} ${v == null || v === '' ? 'empty' : ''}">
           <span class="lbl">${confDot(key)}${label}</span>
           <input name="${key}" data-kind="${kind}" value="${esc(val)}"
-            ${kind === 'date' ? 'type="date"' : kind === 'money' ? 'inputmode="numeric"' : key === 'businessNumber' ? 'inputmode="numeric" placeholder="000-00-00000"' : ''}>
+            ${kind === 'date' ? 'type="date"' : kind === 'month' ? 'type="month"' : kind === 'money' ? 'inputmode="numeric"' : key === 'businessNumber' ? 'inputmode="numeric" placeholder="000-00-00000"' : ''}>
           ${st ? `<small>${esc(st.message)}</small>` : ''}
         </label>`;
     };
@@ -388,7 +397,7 @@
     const $items = document.getElementById('items');
     function drawItems() {
       $items.innerHTML = items.length ? items.map((it, i) => {
-        const bad = Math.abs((+it.quantity || 0) * (+it.unitPrice || 0) - (+it.amount || 0)) > 1;
+        const bad = itemMismatch(it);
         return `
         <div class="item ${bad ? 'bad' : ''}" data-i="${i}">
           <input class="name" data-k="itemName" value="${esc(it.itemName)}" placeholder="품목명">
@@ -416,7 +425,7 @@
           row.querySelector('[data-k="amount"]').value = fmt(it.amount);
         }
       }
-      row.classList.toggle('bad', Math.abs((it.quantity || 0) * (it.unitPrice || 0) - (it.amount || 0)) > 1);
+      row.classList.toggle('bad', itemMismatch(it));
       drawChecks();
     });
     $items.addEventListener('click', (e) => {

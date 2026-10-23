@@ -35,6 +35,7 @@ const toEx = (r) => r && {
   issueDate: r.issue_date, dueDate: r.due_date, totalAmount: r.total_amount, taxAmount: r.tax_amount,
   rawText: r.raw_text, confidenceScore: r.confidence_score, fieldConfidence: r.field_confidence,
   ocrConfidence: r.ocr_confidence, qualityIssues: r.quality_issues,
+  customerName: r.customer_name, billingMonth: r.billing_month,
 };
 const toItem = (r) => ({
   id: r.id, extractedDataId: r.extracted_data_id, lineNo: r.line_no, itemName: r.item_name,
@@ -170,6 +171,9 @@ app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
+  // 교차 출처 격리 → 지원 브라우저에서 OCR(WebAssembly)이 여러 코어를 쓸 수 있다
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
   next();
 });
 app.use(express.json({ limit: '20mb' }));
@@ -325,11 +329,13 @@ app.put('/api/documents/:id/extraction', wrap(async (req, res) => {
     await c.query('DELETE FROM extracted_data WHERE document_id = $1', [id]);
     const { rows } = await c.query(
       `INSERT INTO extracted_data (document_id, vendor_name, business_number, issue_date, due_date,
-         total_amount, tax_amount, raw_text, confidence_score, field_confidence, ocr_confidence, quality_issues)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+         total_amount, tax_amount, raw_text, confidence_score, field_confidence, ocr_confidence, quality_issues,
+         customer_name, billing_month)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
       [id, data.vendorName || null, data.businessNumber || null, data.issueDate || null, data.dueDate || null,
         data.totalAmount ?? null, data.taxAmount ?? null, data.rawText || '', data.confidenceScore ?? null,
-        JSON.stringify(data.fieldConfidence || {}), data.ocrConfidence ?? null, JSON.stringify(data.qualityIssues || [])],
+        JSON.stringify(data.fieldConfidence || {}), data.ocrConfidence ?? null, JSON.stringify(data.qualityIssues || []),
+        data.customerName || null, /^\d{4}-\d{2}$/.test(data.billingMonth || '') ? data.billingMonth : null],
     );
     for (const [i, it] of items.entries()) {
       await c.query(
@@ -371,6 +377,18 @@ app.delete('/api/documents/:id', wrap(async (req, res) => {
 }));
 
 // 전체 데이터 내보내기
+// 거래처 기억: 사람이 검수해 확정한(자동 확정 제외) 상호·고객명. 인식 오타를 이 이름들로 보정한다
+app.get('/api/memory', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT array_remove(array_agg(DISTINCT e.vendor_name), NULL) AS vendors,
+            array_remove(array_agg(DISTINCT e.customer_name), NULL) AS customers
+       FROM extracted_data e JOIN documents d ON d.id = e.document_id
+      WHERE d.user_id = $1 AND d.status = 'verified' AND d.verified_by IS DISTINCT FROM 'auto'`,
+    [req.user.id],
+  );
+  res.json({ vendors: rows[0].vendors || [], customers: rows[0].customers || [] });
+}));
+
 app.get('/api/export', wrap(async (req, res) => {
   const q = (sql) => pool.query(sql, [req.user.id]).then((r) => r.rows);
   res.json({
@@ -390,7 +408,7 @@ app.use('/api', (req, res) => res.status(404).json({ error: '없는 API입니다
 
 // 정적 파일: 앱 셸만 공개. 서비스 워커와 index.html은 항상 새로 확인하게 한다
 const PUBLIC = new Set(['index.html', 'manifest.webmanifest', 'sw.js']);
-const PUBLIC_DIRS = ['css', 'js', 'icons'];
+const PUBLIC_DIRS = ['css', 'js', 'icons', 'models'];
 app.use((req, res, next) => {
   const p = decodeURIComponent(req.path).replace(/^\/+/, '') || 'index.html';
   if (!PUBLIC.has(p) && !PUBLIC_DIRS.some((d) => p.startsWith(d + '/'))) return res.status(404).end();

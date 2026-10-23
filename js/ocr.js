@@ -1,14 +1,45 @@
-// 이미지 품질 검사 + 전처리 + Tesseract.js OCR (한국어+영어)
+// 이미지 품질 검사 + PaddleOCR(ONNX, 휴대폰 CPU에서 실행) 글자 인식
 const OCR = (() => {
-  let workerPromise;
+  const MODEL_BASE = '/models/';
+  let enginePromise;
 
-  function getWorker(onProgress) {
-    if (!workerPromise) {
-      workerPromise = Tesseract.createWorker('kor+eng', 1, {
-        logger: (m) => onProgress && onProgress(m),
-      });
+  // 모델은 처음 한 번만 받고(약 16MB) 서비스 워커가 휴대폰에 저장해 둔다
+  async function fetchModel(url, onProgress, label) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`인식 모델을 받지 못했습니다 (${res.status})`);
+    const total = +res.headers.get('Content-Length') || 0;
+    if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+    const reader = res.body.getReader();
+    const buf = new Uint8Array(total);
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf.set(value, got);
+      got += value.length;
+      if (onProgress) onProgress({ status: label, progress: got / total });
     }
-    return workerPromise;
+    return buf;
+  }
+
+  function getEngine(onProgress) {
+    if (!enginePromise) {
+      enginePromise = (async () => {
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+        // 교차 출처 격리가 된 브라우저(안드로이드 크롬 등)에서만 멀티스레드 사용
+        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+        const [det, rec, dict] = await Promise.all([
+          fetchModel(MODEL_BASE + 'det.onnx', onProgress, '글자 위치 모델 받는 중'),
+          fetchModel(MODEL_BASE + 'rec_korean.onnx', onProgress, '한국어 인식 모델 받는 중'),
+          fetch(MODEL_BASE + 'dict_korean.txt').then((r) => r.text()),
+        ]);
+        return PaddleOCR.create({
+          ort, detModel: det, recModel: rec, dictText: dict,
+          sessionOptions: { executionProviders: ['wasm'], graphOptimizationLevel: 'all' },
+        });
+      })().catch((e) => { enginePromise = null; throw e; });
+    }
+    return enginePromise;
   }
 
   function loadImage(src) {
@@ -63,43 +94,41 @@ const OCR = (() => {
     return { brightness, sharpness, issues };
   }
 
-  // 회색조 + 대비 보정 — 영수증/고지서의 연한 인쇄에 효과적
-  async function preprocess(src) {
+  // 사진 → RGBA 픽셀 (너무 크면 긴 변 2400px로 줄임)
+  async function pixels(src, maxSide = 2400) {
     const img = await loadImage(src);
-    const s = Math.min(2, 2000 / img.width);
+    const s = Math.min(1, maxSide / Math.max(img.width, img.height));
     const c = document.createElement('canvas');
     c.width = Math.round(img.width * s);
     c.height = Math.round(img.height * s);
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(img, 0, 0, c.width, c.height);
-    const id = ctx.getImageData(0, 0, c.width, c.height);
-    const d = id.data;
-    let min = 255, max = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      d[i] = v;
-      if (v < min) min = v;
-      if (v > max) max = v;
-    }
-    const range = Math.max(1, max - min);
-    for (let i = 0; i < d.length; i += 4) {
-      const v = ((d[i] - min) / range) * 255;
-      d[i] = d[i + 1] = d[i + 2] = v;
-    }
-    ctx.putImageData(id, 0, 0);
-    return c;
+    return ctx.getImageData(0, 0, c.width, c.height);
   }
 
+  // 인식 결과 형식: { text, confidence, lines:[{text, confidence, box, words}], words, rotation }
   async function recognize(src, onProgress) {
-    const worker = await getWorker(onProgress);
-    const canvas = await preprocess(src);
-    const { data } = await worker.recognize(canvas);
-    return {
-      text: data.text,
-      confidence: data.confidence,
-      lines: (data.lines || []).map((l) => ({ text: l.text, confidence: l.confidence })),
-    };
+    const engine = await getEngine(onProgress);
+    const img = await pixels(src);
+    return engine.run(img, (p) => onProgress && onProgress({ status: '글자 인식 중', progress: p }));
   }
 
-  return { recognize, quality, downscale };
+  // OCR이 문서를 돌려 읽었으면(rotation°) 저장용 사진도 같은 방향으로 바로 세운다
+  async function rotateDataUrl(src, deg, quality = 0.85) {
+    const img = await loadImage(src);
+    const vertical = deg === 90 || deg === 270;
+    const c = document.createElement('canvas');
+    c.width = vertical ? img.height : img.width;
+    c.height = vertical ? img.width : img.height;
+    const ctx = c.getContext('2d');
+    ctx.translate(c.width / 2, c.height / 2);
+    ctx.rotate((deg * Math.PI) / 180);
+    ctx.drawImage(img, -img.width / 2, -img.height / 2);
+    return c.toDataURL('image/jpeg', quality);
+  }
+
+  // 화면을 띄우자마자 모델을 미리 받아 두면 첫 촬영이 빨라진다
+  const warmup = () => getEngine().catch(() => {});
+
+  return { recognize, quality, downscale, rotateDataUrl, warmup };
 })();

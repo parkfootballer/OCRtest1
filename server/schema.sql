@@ -83,3 +83,7 @@ CREATE TABLE IF NOT EXISTS images (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS images_document_idx ON images (document_id);
+
+-- 라벨링 데이터에 맞춰 추가한 추출 필드
+ALTER TABLE extracted_data ADD COLUMN IF NOT EXISTS customer_name text;   -- 공급받는자 / 고지서 고객명
+ALTER TABLE extracted_data ADD COLUMN IF NOT EXISTS billing_month text;   -- 청구년월 YYYY-MM

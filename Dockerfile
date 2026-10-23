@@ -12,6 +12,7 @@ COPY index.html manifest.webmanifest sw.js ./
 COPY css css
 COPY js js
 COPY icons icons
+COPY models models
 COPY server/server.js server/schema.sql server/
 
 USER node

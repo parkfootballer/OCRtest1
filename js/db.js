@@ -81,8 +81,13 @@ const DB = (() => {
     return api('GET', '/export');
   }
 
+  // 거래처 기억: 검수 확정된 상호·고객명 목록 → 인식 오타 보정에 쓴다
+  function memory() {
+    return api('GET', '/memory');
+  }
+
   return {
     currentUser, login, signup, logout, authConfig, createDocument, saveExtraction, documentBundle,
-    listDocuments, setStatus, logReview, deleteDocument, exportAll,
+    listDocuments, setStatus, logReview, deleteDocument, exportAll, memory,
   };
 })();
