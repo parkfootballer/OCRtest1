@@ -1,13 +1,13 @@
 // 서비스 워커: 앱 셸은 미리 캐시해 즉시 열리게 하고, OCR 엔진·한국어 모델(CDN)은 한 번 받으면 재사용한다.
 // 앱 파일을 바꿨다면 VERSION을 올려야 휴대폰에 새 버전이 반영된다.
-const VERSION = 'v2';
+const VERSION = 'v3'; // v3: 업장·재고·중복 감지·문서 영역 보정
 const SHELL = `shell-${VERSION}`;
 const OCR_CACHE = 'ocr-assets-v2'; // v2: Tesseract → PaddleOCR 모델(/models/)
 
 const SHELL_FILES = [
   '/', '/index.html', '/manifest.webmanifest',
   '/css/style.css',
-  '/js/paddle.js', '/js/db.js', '/js/parser.js', '/js/ocr.js', '/js/samples.js', '/js/app.js',
+  '/js/paddle.js', '/js/db.js', '/js/parser.js', '/js/ocr.js', '/js/scanner.js', '/js/samples.js', '/js/app.js',
   '/icons/icon-192.png', '/icons/apple-touch-icon.png', '/icons/favicon-32.png',
 ];
 const OCR_HOSTS = ['cdn.jsdelivr.net'];

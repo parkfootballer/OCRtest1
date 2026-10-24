@@ -21,8 +21,10 @@
     <main id="view"></main>
     <nav id="tabbar">
       <a href="#/" data-tab="home"><span class="ico">▤</span><span>문서함</span></a>
+      <a href="#/inventory" data-tab="inventory"><span class="ico">▦</span><span>재고</span></a>
       <a href="#/camera" class="shoot" aria-label="촬영"><span class="shutter-mini"></span></a>
       <a href="#/queue" data-tab="queue"><span class="ico">✓</span><span>검수</span><b id="queueBadge" hidden></b></a>
+      <a href="#/me" data-tab="me"><span class="ico">☺</span><span>내 정보</span></a>
     </nav>
   </div>
   <div id="toast" role="status" aria-live="polite"></div>
@@ -32,6 +34,7 @@
   <script src="/js/db.js"></script>
   <script src="/js/parser.js"></script>
   <script src="/js/ocr.js"></script>
+  <script src="/js/scanner.js"></script>
   <script src="/js/samples.js"></script>
   <script src="/js/app.js"></script>
   <script>

@@ -222,3 +222,115 @@ button, input, select { font: inherit; color: inherit; }
 .auth-form .btn { margin-top: 6px; }
 .form-err { margin: 0; color: var(--err); font-size: 14px; }
 .form-err[hidden] { display: none; }
+
+/* ---------- 업장·재고·중복·영역 보정 ---------- */
+#tabbar a { min-width: 56px; }
+.top h1 small.wp { display: block; font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: 0; margin-top: 2px; }
+.dup-tag { color: var(--warn); font-weight: 600; }
+.code-msg { color: var(--muted) !important; }
+.code-msg.ok { color: var(--ok) !important; }
+.code-msg.bad { color: var(--err) !important; }
+
+/* 확인 창 */
+.modal { position: fixed; inset: 0; z-index: 80; background: rgba(15, 23, 42, .55); display: flex; align-items: flex-end; justify-content: center; }
+.sheet { width: 100%; max-width: 520px; max-height: 88vh; overflow: auto; background: var(--surface); color: var(--text); border-radius: 20px 20px 0 0; padding: 20px 16px calc(var(--safe-b) + 16px); animation: up .2s ease-out; }
+@keyframes up { from { transform: translateY(30px); opacity: 0; } }
+.sheet h2 { margin: 0 0 8px; font-size: 18px; }
+.sheet-body p { margin: 6px 0; font-size: 14px; }
+.sheet-actions { display: grid; gap: 8px; margin-top: 14px; }
+.btn.danger-fill { background: var(--err); color: #fff; }
+.dup-list { list-style: none; padding: 0; margin: 10px 0; display: grid; gap: 8px; }
+.dup-list li { display: flex; gap: 10px; padding: 10px; border-radius: 12px; border: 1.5px solid var(--line); }
+.dup-list li.exact { border-color: var(--err); background: color-mix(in srgb, var(--err) 6%, var(--surface)); }
+.dup-list li.possible { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 6%, var(--surface)); }
+.dup-list img { width: 52px; height: 66px; object-fit: cover; border-radius: 6px; flex: none; background: var(--line); }
+.dup-list div { display: grid; gap: 2px; min-width: 0; }
+.dup-list small { color: var(--muted); font-size: 12px; }
+.dup-level { font-size: 11px; font-weight: 700; color: var(--warn); }
+.dup-list li.exact .dup-level { color: var(--err); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.chips em { font-style: normal; font-size: 11px; padding: 2px 7px; border-radius: 99px; background: var(--bg); border: 1px solid var(--line); }
+.del-list { margin: 8px 0; padding-left: 20px; font-size: 14px; display: grid; gap: 3px; }
+.del-list .warn { color: var(--warn); font-weight: 600; }
+
+/* 검수 화면 */
+.del-btn { border: 0; background: none; color: var(--err); font-weight: 600; cursor: pointer; padding: 6px 4px; }
+.name-row { display: grid; grid-template-columns: 1fr 76px; gap: 6px; }
+.item .unit { text-align: center; }
+.dup-card { border: 1.5px solid var(--warn); }
+.dup-card p { margin: 0 0 8px; font-size: 14px; }
+.inv-moves { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 2px; }
+.inv-moves li, .inv-moves li > a, .inv-moves li > span { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.inv-moves li { padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.inv-moves li:first-child { border-top: 0; }
+.inv-moves li > a, .inv-moves li > span { flex: 1; }
+.inv-moves li a > span, .inv-moves li > span > span { display: grid; min-width: 0; }
+.inv-moves small { color: var(--muted); font-size: 12px; }
+.inv-moves .plus, .inv-moves li > b { color: var(--ok); white-space: nowrap; }
+
+/* 재고 */
+.inv-note { margin: 0; }
+.search { height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 14px; background: var(--surface); font-size: 15px; width: 100%; }
+.inv-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.inv-list li[hidden] { display: none; }
+.inv-list a { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: var(--surface); border-radius: var(--radius); padding: 14px; }
+.inv-list a div { display: grid; min-width: 0; }
+.inv-list b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inv-list small { color: var(--muted); font-size: 12px; }
+.qty { font-size: 20px; font-weight: 700; white-space: nowrap; }
+.qty em, .inv-head em { font-style: normal; font-size: 13px; color: var(--muted); margin-left: 3px; font-weight: 500; }
+.inv-head { display: flex; justify-content: space-between; align-items: baseline; }
+.inv-head b { font-size: 28px; }
+
+/* 내 정보: 업장·코드·학습 */
+.wp-name { margin: 0 0 4px; }
+.members { margin-top: 10px; }
+.members summary { font-size: 14px; cursor: pointer; color: var(--brand); }
+.members ul { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; font-size: 14px; }
+.members small { color: var(--muted); }
+.wp-form { display: grid; gap: 10px; margin-top: 10px; }
+.code-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+.code-form .btn { grid-column: 1 / -1; height: 44px; }
+.code-form select { height: 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); padding: 0 8px; }
+.codes { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.codes li { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.codes code { font-size: 17px; font-weight: 700; letter-spacing: .06em; }
+.codes li.off code { color: var(--muted); text-decoration: line-through; }
+.codes span { flex: 1; display: grid; font-size: 12px; }
+.codes em { font-style: normal; font-weight: 600; color: var(--ok); }
+.codes li.off em { color: var(--muted); }
+.codes small { color: var(--muted); }
+.tstats { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
+.tstats th, .tstats td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+.tstats th { color: var(--muted); font-weight: 500; }
+
+/* 카메라: 문서 윤곽·안내·줌 */
+.camera .viewport { position: absolute; inset: 0; overflow: hidden; }
+.camera video { transform-origin: 50% 50%; transition: transform .15s; }
+.frame { right: auto; bottom: auto; transition: opacity .2s; }
+.frame.dim { opacity: .25; }
+.doc-outline { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.doc-outline polygon { fill: rgba(37, 99, 235, .12); stroke: #fff; stroke-width: 3; stroke-linejoin: round; display: none; transition: stroke .2s; }
+.doc-outline[data-state="good"] polygon { display: block; stroke: #22c55e; fill: rgba(34, 197, 94, .14); }
+.doc-outline[data-state="near"] polygon, .doc-outline[data-state="far"] polygon { display: block; stroke: #f59e0b; fill: rgba(245, 158, 11, .1); }
+.cam-hint { top: calc(env(safe-area-inset-top, 0px) + 64px); }
+.cam-hint.good { color: #4ade80; font-weight: 700; }
+.zoom-ctl { display: flex; justify-content: center; align-items: center; gap: 6px; margin: 0 auto 12px; }
+.zoom-ctl[hidden] { display: none; }
+.zoom-ctl button { width: 34px; height: 34px; border-radius: 50%; border: 0; background: rgba(255, 255, 255, .15); color: #fff; font-size: 18px; cursor: pointer; }
+.zoom-ctl span { min-width: 46px; text-align: center; font-size: 13px; font-weight: 600; }
+.zoom-ctl .zoom-auto { width: auto; padding: 0 12px; border-radius: 17px; font-size: 12px; }
+.zoom-ctl .zoom-auto.on { background: #fff; color: #000; font-weight: 700; }
+
+/* 영역 조정(크롭) */
+.cropper { position: fixed; inset: 0; z-index: 70; background: #000; color: #fff; display: flex; flex-direction: column; max-width: 520px; margin: 0 auto; }
+.crop-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 10px; font-size: 14px; }
+.crop-stage { position: relative; flex: 1; margin: 0 16px; touch-action: none; }
+.crop-stage img { position: absolute; user-select: none; -webkit-user-drag: none; }
+.crop-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.crop-stage polygon { fill: rgba(37, 99, 235, .18); stroke: #3b82f6; stroke-width: 2.5; }
+.crop-stage .h { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; background: rgba(59, 130, 246, .35); border: 3px solid #fff; touch-action: none; cursor: grab; }
+.crop-stage .h::after { content: ""; position: absolute; inset: -12px; } /* 손가락으로 잡기 쉽게 */
+.crop-hint { text-align: center; font-size: 13px; opacity: .85; margin: 10px 16px; }
+.crop-actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: 8px; padding: 0 16px calc(var(--safe-b) + 16px); }
+.crop-actions .btn.ghost { background: rgba(255, 255, 255, .12); border: 0; color: #fff; }

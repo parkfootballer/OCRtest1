@@ -130,5 +130,18 @@ const OCR = (() => {
   // 화면을 띄우자마자 모델을 미리 받아 두면 첫 촬영이 빨라진다
   const warmup = () => getEngine().catch(() => {});
 
-  return { recognize, quality, downscale, rotateDataUrl, warmup };
+  // 학습 데이터에 남기는 엔진·모델 식별자 (models/README.md의 SHA-256 앞 8자리). 모델을 바꾸면 함께 바꾼다
+  const ENGINE = 'paddleocr-onnx';
+  const MODEL_VERSION = 'det:PP-OCRv3-mobile@ee40e800+rec:korean-PP-OCRv5-mobile@322f1401';
+
+  // recognize() 결과에서 서버에 저장할 부분만 (글자·신뢰도·상자). 상자 좌표는 바로 세운 이미지 기준
+  function toStored(ocr) {
+    const pick = (x) => ({ text: x.text, confidence: Math.round(x.confidence * 10) / 10, box: x.box });
+    return {
+      width: ocr.width, height: ocr.height, rotation: ocr.rotation, confidence: Math.round(ocr.confidence * 10) / 10,
+      lines: ocr.lines.map(pick), words: ocr.words.map(pick),
+    };
+  }
+
+  return { recognize, quality, downscale, rotateDataUrl, warmup, toStored, ENGINE, MODEL_VERSION };
 })();

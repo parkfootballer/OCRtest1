@@ -1,0 +1,12 @@
+{
+  "name": "chalkak-training-dataset",
+  "version": "0.1.0",
+  "private": true,
+  "description": "앱에서 내보낸 검수 데이터를 PaddleOCR 학습셋·평가셋으로 변환",
+  "scripts": {
+    "build": "node build-dataset.js"
+  },
+  "dependencies": {
+    "sharp": "0.33.5"
+  }
+}

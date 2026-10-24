@@ -13,7 +13,7 @@ COPY css css
 COPY js js
 COPY icons icons
 COPY models models
-COPY server/server.js server/schema.sql server/
+COPY server/*.js server/schema.sql server/
 
 USER node
 EXPOSE 8080

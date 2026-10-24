@@ -38,11 +38,24 @@ const DB = (() => {
     await api('POST', '/auth/logout');
   }
   const authConfig = () => api('GET', '/auth/config');
+  // 가입 코드 확인 → { newWorkplace, hotelName, workplaceName }
+  const checkCode = (code) => api('POST', '/auth/check-code', { code });
 
   // imageUrl에는 촬영한 dataURL이 들어온다 → 서버가 파일로 저장하고 URL을 돌려준다
-  function createDocument({ documentType, imageUrl }) {
-    return api('POST', '/documents', { documentType, image: imageUrl });
+  // fileHash: 원본 파일 SHA-256 (중복 확인용), duplicateOf: 중복 경고를 보고도 등록할 때의 원본 문서
+  function createDocument({ documentType, imageUrl, fileHash, duplicateOf }) {
+    return api('POST', '/documents', { documentType, image: imageUrl, fileHash, duplicateOf });
   }
+
+  // ---- 중복 확인 ----
+  const checkFileDuplicates = (fileHash) => api('POST', '/duplicates/check', { fileHash });
+  const documentDuplicates = (documentId) => api('GET', `/documents/${documentId}/duplicates`);
+  // decision: 'duplicate'(재고 미반영) | 'distinct'(별개 문서) | null
+  const setDuplicate = (documentId, decision, duplicateOf) =>
+    api('PATCH', `/documents/${documentId}`, { duplicateDecision: decision, duplicateOf: duplicateOf || null });
+
+  // 최초 OCR 결과 (학습 데이터용)
+  const saveOcrResult = (documentId, payload) => api('POST', `/documents/${documentId}/ocr-results`, payload);
 
   function saveExtraction(documentId, data, items) {
     return api('PUT', `/documents/${documentId}/extraction`, { data, items });
@@ -73,6 +86,7 @@ const DB = (() => {
     return saved;
   }
 
+  // 삭제 결과: { revertedItems: [재고에서 되돌린 품목], promotedDocumentId }
   function deleteDocument(documentId) {
     return api('DELETE', `/documents/${documentId}`);
   }
@@ -86,8 +100,28 @@ const DB = (() => {
     return api('GET', '/memory');
   }
 
+  // ---- 업장 ----
+  const workplace = () => api('GET', '/workplace');
+  async function updateWorkplace(fields) {
+    me = await api('PATCH', '/workplace', fields);
+    return me;
+  }
+  const issueCode = (opts) => api('POST', '/workplace/codes', opts);
+  const revokeCode = (id) => api('DELETE', `/workplace/codes/${id}`);
+
+  // ---- 재고 ----
+  const inventory = () => api('GET', '/inventory');
+  const inventoryItem = (id) => api('GET', `/inventory/${id}`);
+
+  // ---- 학습 데이터 (관리자) ----
+  const trainingStats = () => api('GET', '/training/stats');
+  const trainingExport = ({ documentType = '', limit = 50, offset = 0 } = {}) =>
+    api('GET', `/training/export?documentType=${encodeURIComponent(documentType)}&limit=${limit}&offset=${offset}`);
+
   return {
-    currentUser, login, signup, logout, authConfig, createDocument, saveExtraction, documentBundle,
+    currentUser, login, signup, logout, authConfig, checkCode, createDocument, saveExtraction, documentBundle,
     listDocuments, setStatus, logReview, deleteDocument, exportAll, memory,
+    checkFileDuplicates, documentDuplicates, setDuplicate, saveOcrResult,
+    workplace, updateWorkplace, issueCode, revokeCode, inventory, inventoryItem, trainingStats, trainingExport,
   };
 })();

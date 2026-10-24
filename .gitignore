@@ -4,6 +4,10 @@ server/.env
 server/.pg-superuser
 .claude/
 tools/eval/node_modules/
+tools/training/node_modules/
+tools/training/dataset/
+tools/training/*.json
+!tools/training/package.json
 tools/eval/cache/
 tools/eval/results/
 tools/eval/*.log

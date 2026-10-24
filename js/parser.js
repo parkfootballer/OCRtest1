@@ -31,6 +31,7 @@ const Parser = (() => {
     invTotal: [/^[합함]계금[액역억엑맥]/, /^총[합함]계/, /^청구금[액역]/, /^[합함]계/],
     tax: /^(부가가치세|부가세|세[액역억엑]|VAT)/i,
     supply: /^공급가(액)?/,
+    docNo: [/^(문서번호|일련번호|전표번호|거래번호|명세서번호|관리번호|발행번호)/, /^(No\.?|NO\.?|№)(?![A-Za-z])/],
   };
   const NOT_VALUE = /^(번호|등록번호|전화|이름|대표|성명|주소|상호|공급|고객|합계|금액|단가|수량|규격|품명|사업자)/;
 
@@ -122,6 +123,14 @@ const Parser = (() => {
     t = t.replace(/\s*(귀하|고객님|님)$/, '').trim();
     return t;
   }
+  // 문서번호: 숫자가 들어간 4~30자 영숫자(-, / 허용). 날짜·사업자번호·전화번호는 제외
+  const docNoPick = (s) => {
+    const t = String(s).replace(/^[\s:：#.\-]+/, '');
+    if (new RegExp(DATE_RE.source).test(t) || BIZ_ONE.test(t)) return null;
+    const m = t.match(/^[A-Za-z0-9][A-Za-z0-9\-/]{3,29}/);
+    if (!m || !/\d/.test(m[0]) || /^\d{2,4}-\d{3,4}-\d{4}$/.test(m[0])) return null;
+    return m[0].toUpperCase();
+  };
   const textPick = (keepAt) => (s) => {
     const t = cleanName(s, keepAt);
     if (compact(t).length < 2 || NOT_VALUE.test(compact(t)) || /^[\d\s,.-]+$/.test(t)) return null;
@@ -157,6 +166,9 @@ const Parser = (() => {
     return { rawText, lines, words };
   }
 
+  // 값이 읽힌 글자 상자 [x0, y0, x1, y1] — 검수 후 학습 데이터에서 "이 위치의 글자는 원래 이것"을 만드는 데 쓴다
+  const boxOf = (w) => [w.x0, w.y0, w.x1, w.y1].map(Math.round);
+
   // 라벨 상자 기준으로 값 찾기: ① 같은 상자 안 라벨 뒤 ② 같은 줄 오른쪽 ③ 바로 아래
   function valueNear(words, label, re, pick, { right = true, below = true, maxRight = 40 } = {}) {
     // ① 라벨 뒤 글자: 원문에서 라벨 길이만큼(공백 무시) 건너뛴 나머지
@@ -167,7 +179,7 @@ const Parser = (() => {
       while (i < t.length && n > 0) { if (!/\s/.test(t[i])) n--; i++; }
       // "고객명(Name)", "납부마감일(Due date)"의 영문 괄호 설명은 값이 아님 ("(주)"는 값의 일부)
       const rest = t.slice(i).replace(/^\s*(?:\([A-Za-z .]*\))?[\s:：\-–)]*/, '');
-      if (rest) { const v = pick(rest); if (v != null) return { value: v, conf: label.conf }; }
+      if (rest) { const v = pick(rest); if (v != null) return { value: v, conf: label.conf, box: boxOf(label) }; }
     }
     const L = label;
     if (right) {
@@ -176,7 +188,7 @@ const Parser = (() => {
           && Math.min(w.y1, L.y1) - Math.max(w.y0, L.y0) > Math.min(w.h, L.h) * 0.45)
         .sort((a, b) => a.x0 - b.x0)
         .slice(0, 3);
-      for (const w of cands) { const v = pick(w.text); if (v != null) return { value: v, conf: Math.min(w.conf, L.conf) }; }
+      for (const w of cands) { const v = pick(w.text); if (v != null) return { value: v, conf: Math.min(w.conf, L.conf), box: boxOf(w) }; }
     }
     if (below) {
       const cands = words
@@ -184,7 +196,7 @@ const Parser = (() => {
           && Math.min(w.x1, L.x1 + L.h * 4) - Math.max(w.x0, L.x0 - L.h * 2) > 0)
         .sort((a, b) => a.y0 - b.y0 || Math.abs(a.cx - L.cx) - Math.abs(b.cx - L.cx))
         .slice(0, 2);
-      for (const w of cands) { const v = pick(w.text); if (v != null) return { value: v, conf: Math.min(w.conf, L.conf) * 0.9 }; }
+      for (const w of cands) { const v = pick(w.text); if (v != null) return { value: v, conf: Math.min(w.conf, L.conf) * 0.9, box: boxOf(w) }; }
     }
     return null;
   }
@@ -415,14 +427,20 @@ const Parser = (() => {
     const bill = isBillType(documentType);
     const pageH = ocr.height || Math.max(1, ...words.map((w) => w.y1));
     const fc = {}; // 필드별 신뢰도 0~1
-    const set = (obj, key, r, k = 1) => { if (r && r.value != null) { obj[key] = r.value; fc[key] = Math.max(0, Math.min(1, r.conf * k)); } };
+    const fieldBoxes = {}; // 필드별 값 위치 (학습 데이터용)
+    const set = (obj, key, r, k = 1) => {
+      if (!r || r.value == null) return;
+      obj[key] = r.value;
+      fc[key] = Math.max(0, Math.min(1, r.conf * k));
+      if (r.box) fieldBoxes[key] = r.box; else delete fieldBoxes[key];
+    };
     const d = {};
 
     // 사업자등록번호: 검증번호가 맞는 것 우선
     for (const w of words) {
       for (const m of w.text.matchAll(BIZ_RE)) {
         const n = `${m[1]}-${m[2]}-${m[3]}`;
-        if (!d.businessNumber || (checkBizNumber(n) && !checkBizNumber(d.businessNumber))) set(d, 'businessNumber', { value: n, conf: w.conf });
+        if (!d.businessNumber || (checkBizNumber(n) && !checkBizNumber(d.businessNumber))) set(d, 'businessNumber', { value: n, conf: w.conf, box: boxOf(w) });
       }
       if (d.businessNumber && checkBizNumber(d.businessNumber)) break;
     }
@@ -484,6 +502,9 @@ const Parser = (() => {
       if (first) set(d, 'issueDate', first, 0.6);
     }
 
+    // 문서번호 (일련번호·전표번호 등) — 중복 문서 판단에 쓴다
+    set(d, 'documentNumber', findField(words, LABEL.docNo, docNoPick, { maxRight: 12, below: false }));
+
     // 금액
     const posAmount = (s) => { const v = amountPick(s); return v != null && v >= 0 ? v : null; };
     if (bill) {
@@ -529,11 +550,13 @@ const Parser = (() => {
         issueDate: d.issueDate ?? null,
         dueDate: d.dueDate ?? null,
         billingMonth: d.billingMonth ?? null,
+        documentNumber: d.documentNumber ?? null,
         totalAmount: d.totalAmount ?? null,
         taxAmount: d.taxAmount ?? null,
         rawText, confidenceScore, fieldConfidence: fc, ocrConfidence: ocrConf,
       },
-      lineItems: lineItems.map(({ itemName, quantity, unitPrice, amount }) => ({ itemName, quantity, unitPrice, amount })),
+      lineItems: lineItems.map(({ itemName, unit, quantity, unitPrice, amount }) => ({ itemName, unit: unit || null, quantity, unitPrice, amount })),
+      fieldBoxes,
     };
   }
 

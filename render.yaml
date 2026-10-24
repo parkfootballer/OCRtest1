@@ -14,7 +14,8 @@ services:
         fromDatabase:
           name: chalkak-db
           property: connectionString
-      - key: SIGNUP_CODE   # 아는 사람만 가입하도록 초대 코드 (Render가 처음에 입력을 요청)
+      - key: SIGNUP_CODE   # 새 업장 개설 코드: 이 코드로 가입하면 입력한 호텔·업장이 새로 만들어지고 관리자가 된다.
+                           # 이후 구성원은 그 업장 관리자가 발급한 업장 가입 코드로 가입한다 (Render가 처음에 입력을 요청)
         sync: false
 
 databases:

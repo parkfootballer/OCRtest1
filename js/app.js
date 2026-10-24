@@ -5,6 +5,8 @@
   const fmt = Parser.fmt;
   let user;
   let stream; // 카메라 MediaStream
+  let camTimer; // 문서 테두리 감지 타이머
+  let onCamResize; // 안내 틀 다시 맞추기
 
   const STATUS = {
     processing: ['인식 중', 'st-proc'],
@@ -15,6 +17,7 @@
   const FIELDS = [
     ['vendorName', '상호(업체명)', 'text'],
     ['businessNumber', '사업자등록번호', 'text'],
+    ['documentNumber', '문서번호', 'text'],
     ['issueDate', '발행일', 'date'],
     ['dueDate', '납부기한', 'date'],
     ['totalAmount', '합계 금액', 'money'],
@@ -44,6 +47,93 @@
   }
   const typeLabel = (t) => Parser.DOC_TYPES[t] || t;
   const dateLabel = (iso) => new Date(iso).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const qtyLabel = (n) => (n == null ? '' : Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 3 }));
+  const INVENTORY_TYPES = ['invoice', 'tax_invoice']; // 비품 구매 문서 → 재고 반영
+
+  // ---------- 확인 창 ----------
+  // actions: [{ label, value, cls }] → 누른 버튼의 value (바깥을 누르면 null)
+  function dialog({ title, body = '', actions }) {
+    return new Promise((resolve) => {
+      const root = document.createElement('div');
+      root.className = 'modal';
+      root.innerHTML = `
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+          <h2>${esc(title)}</h2>
+          <div class="sheet-body">${body}</div>
+          <div class="sheet-actions">${actions.map((a, i) =>
+            `<button class="btn ${a.cls || 'ghost'}" data-i="${i}">${esc(a.label)}</button>`).join('')}</div>
+        </div>`;
+      document.body.appendChild(root);
+      root.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-i]');
+        if (!b && e.target !== root) return;
+        root.remove();
+        resolve(b ? actions[+b.dataset.i].value : null);
+      });
+      root.querySelector('.sheet-actions .btn:last-child')?.focus();
+    });
+  }
+
+  // 원본 파일 SHA-256 — "같은 파일" 중복 판단에 쓴다 (보안 컨텍스트가 아니면 건너뜀)
+  async function sha256Hex(input) {
+    if (!crypto?.subtle) return null;
+    let buf = input;
+    if (typeof input === 'string') buf = await (await fetch(input)).arrayBuffer(); // dataURL
+    const h = await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // 중복 경고: 기존 문서 정보와 함께 선택지를 보여 준다
+  // 반환: { decision: 'cancel' | 'duplicate' | 'distinct', duplicateOf }
+  async function duplicateDialog(dups, { stage }) {
+    const exact = dups.some((d) => d.level === 'exact');
+    const first = dups.find((d) => d.level === 'exact') || dups[0];
+    const body = `
+      <p class="dup-lead">${exact ? '이미 등록된 문서와 <b>정확히 일치</b>합니다.' : '이미 등록된 문서와 <b>일부 정보가 같습니다</b>. 같은 문서인지 확인해 주세요.'}</p>
+      <ul class="dup-list">${dups.map((d) => `
+        <li class="${d.level}">
+          ${d.document.imageUrl ? `<img src="${d.document.imageUrl}" alt="">` : ''}
+          <div>
+            <span class="dup-level">${d.level === 'exact' ? '정확히 일치' : '중복 가능성'}</span>
+            <b>${esc(d.document.vendorName || '상호 미확인')}</b>
+            <small>${typeLabel(d.document.documentType)} · ${d.document.issueDate || d.document.billingMonth || '날짜 미확인'}
+              · ${d.document.totalAmount != null ? fmt(d.document.totalAmount) + '원' : '금액 미확인'}</small>
+            <small>${d.document.documentNumber ? `문서번호 ${esc(d.document.documentNumber)} · ` : ''}${dateLabel(d.document.createdAt)} 등록 · ${STATUS[d.document.status]?.[0] || ''}</small>
+            <span class="chips">${d.reasons.map((r) => `<em>${esc(r)}</em>`).join('')}</span>
+          </div>
+        </li>`).join('')}</ul>
+      <p class="muted">중복으로 등록하면 문서는 보관되지만 <b>재고에는 반영되지 않습니다</b>.</p>`;
+    const actions = [{ label: stage === 'review' ? '돌아가서 수정' : '등록 취소', value: 'cancel' }];
+    if (!exact) actions.push({ label: '다른 문서예요 (별개 등록)', value: 'distinct' });
+    actions.push({ label: '중복으로 등록', value: 'duplicate', cls: 'primary' });
+    const decision = (await dialog({ title: exact ? '중복 문서입니다' : '중복일 수 있습니다', body, actions })) || 'cancel';
+    return { decision, duplicateOf: first.document.id };
+  }
+
+  // 문서 삭제 확인 → 삭제 (연결된 OCR 결과·학습 데이터·재고 반영까지)
+  async function confirmDelete(id, b) {
+    b = b || (await DB.documentBundle(id));
+    if (!b) return false;
+    const inv = b.inventory || [];
+    const body = `
+      <p>이 문서와 연결된 데이터가 모두 삭제되며 되돌릴 수 없습니다.</p>
+      <ul class="del-list">
+        <li>촬영 이미지</li>
+        <li>OCR 인식 결과·추출 정보${b.items?.length ? ` (품목 ${b.items.length}개)` : ''}</li>
+        ${b.logs?.length ? `<li>검수 기록 ${b.logs.length}건</li>` : ''}
+        ${b.training ? '<li>학습용 검수 데이터</li>' : ''}
+        ${inv.length ? `<li class="warn">재고에서 되돌림: ${inv.map((m) => `${esc(m.name)} ${qtyLabel(m.quantity)}${esc(m.unit || '')}`).join(', ')}</li>` : ''}
+      </ul>`;
+    const ok = await dialog({
+      title: '문서를 삭제할까요?', body,
+      actions: [{ label: '취소', value: false }, { label: '삭제', value: true, cls: 'danger-fill' }],
+    });
+    if (!ok) return false;
+    const r = await DB.deleteDocument(id);
+    await refreshBadge();
+    toast(r?.revertedItems?.length ? `삭제했습니다 · 재고 ${r.revertedItems.length}개 품목 되돌림` : '삭제했습니다');
+    return true;
+  }
 
   async function refreshBadge() {
     const list = await DB.listDocuments();
@@ -64,7 +154,7 @@
 
     h(`
       <header class="top">
-        <h1>${mode === 'queue' ? '검수함' : '문서함'}</h1>
+        <h1>${mode === 'queue' ? '검수함' : '문서함'}<small class="wp">${esc(user.workplace.hotelName)} · ${esc(user.workplace.name)}</small></h1>
         ${mode === 'queue' ? '' : `<a class="avatar" href="#/me" aria-label="내 정보">${esc((user.name || '?').slice(0, 1))}</a>`}
       </header>
       ${mode !== 'queue' && installState() !== 'installed' && installState() !== 'unsupported' ? `
@@ -83,7 +173,7 @@
             <img src="${doc.imageUrl}" alt="" loading="lazy">
             <div class="meta">
               <div class="row1"><b>${esc(ex?.vendorName || '상호 미확인')}</b>${badge(doc.status)}</div>
-              <div class="row2">${typeLabel(doc.documentType)} · ${dateLabel(doc.createdAt)}</div>
+              <div class="row2">${typeLabel(doc.documentType)} · ${dateLabel(doc.createdAt)}${doc.uploaderName ? ` · ${esc(doc.uploaderName)}` : ''}${doc.duplicateDecision === 'duplicate' ? ' · <span class="dup-tag">중복</span>' : ''}</div>
               <div class="row3">${ex?.totalAmount != null ? fmt(ex.totalAmount) + '원' : '금액 미확인'}
                 ${ex ? `<span class="conf">신뢰도 ${Math.round(ex.confidenceScore * 100)}%</span>` : ''}</div>
             </div>
@@ -106,15 +196,22 @@
     OCR.warmup(); // 촬영하는 동안 인식 모델을 미리 받아 둔다
     h(`
       <div class="camera">
-        <video id="video" playsinline muted autoplay></video>
-        <div class="frame"><i></i><i></i><i></i><i></i></div>
-        <div class="cam-top">
+        <div class="viewport" id="viewport"><video id="video" playsinline muted autoplay></video></div>
+        <div class="frame" id="frame"><i></i><i></i><i></i><i></i></div>
+        <svg class="doc-outline" id="outline" aria-hidden="true"><polygon></polygon></svg>
+        <div class="cam-top" id="camTop">
           <a href="#/" class="icon-btn" aria-label="닫기">✕</a>
           <span class="cam-title">${retakeId ? '재촬영' : '문서 촬영'}</span>
           <button class="icon-btn" id="sampleBtn" title="샘플 문서로 시험">샘플</button>
         </div>
-        <div class="cam-hint" id="camHint">문서의 네 모서리를 가이드 안에 맞춰 주세요</div>
-        <div class="cam-bottom">
+        <div class="cam-hint" id="camHint">문서의 네 모서리를 안내 틀 안에 맞춰 주세요</div>
+        <div class="cam-bottom" id="camBottom">
+          <div class="zoom-ctl" id="zoomCtl" hidden>
+            <button data-z="-" aria-label="축소">−</button>
+            <span id="zoomLbl">1.0×</span>
+            <button data-z="+" aria-label="확대">＋</button>
+            <button class="zoom-auto" id="zoomAuto" hidden>자동 줌</button>
+          </div>
           <div class="types">${Object.entries(Parser.DOC_TYPES).map(([k, v]) =>
             `<button data-type="${k}" class="${k === docType ? 'on' : ''}">${v}</button>`).join('')}</div>
           <div class="controls">
@@ -132,37 +229,155 @@
       </div>
     `);
 
+    const cam = $view.querySelector('.camera');
     const video = document.getElementById('video');
+    const viewport = document.getElementById('viewport');
+    const frame = document.getElementById('frame');
+    const outline = document.getElementById('outline');
+    const poly = outline.querySelector('polygon');
+    const hint = document.getElementById('camHint');
+    const zoomLbl = document.getElementById('zoomLbl');
+    const zoomAutoBtn = document.getElementById('zoomAuto');
+
+    // 안내 틀: 위아래 조작부를 뺀 남은 화면에 A4 세로 비율로 최대한 크게 맞춘다
+    function layoutFrame() {
+      const R = cam.getBoundingClientRect();
+      const top = document.getElementById('camTop').getBoundingClientRect().bottom - R.top + 34;
+      const bottom = document.getElementById('camBottom').getBoundingClientRect().top - R.top - 12;
+      const availW = R.width * 0.9, availH = Math.max(80, bottom - top);
+      const ratio = 1.414;
+      const w = Math.min(availW, availH / ratio), hgt = w * ratio;
+      Object.assign(frame.style, {
+        left: `${(R.width - w) / 2}px`, top: `${top + (availH - hgt) / 2}px`, width: `${w}px`, height: `${hgt}px`,
+      });
+      outline.setAttribute('viewBox', `0 0 ${R.width} ${R.height}`);
+    }
+    layoutFrame();
+    onCamResize = layoutFrame;
+    window.addEventListener('resize', layoutFrame);
+
+    // ---- 줌: 카메라가 지원하면 실제 광학/센서 줌, 아니면 미리보기 확대(디지털 줌 = 가운데 잘라내기) ----
+    let track = null, hwZoom = null, zoom = 1, autoZoom = false;
+    const zoomRange = () => (hwZoom ? [hwZoom.min, Math.min(hwZoom.max, 4)] : [1, 3]);
+    function setZoom(z) {
+      const [lo, hi] = zoomRange();
+      zoom = Math.min(hi, Math.max(lo, z));
+      if (hwZoom) track.applyConstraints({ advanced: [{ zoom }] }).catch(() => {});
+      else video.style.transform = `scale(${zoom})`;
+      zoomLbl.textContent = `${zoom.toFixed(1)}×`;
+    }
+    $view.querySelectorAll('[data-z]').forEach((b) => b.addEventListener('click', () => {
+      autoZoom = false;
+      zoomAutoBtn.classList.remove('on');
+      setZoom(zoom * (b.dataset.z === '+' ? 1.25 : 0.8));
+    }));
+    zoomAutoBtn.addEventListener('click', () => {
+      autoZoom = !autoZoom;
+      zoomAutoBtn.classList.toggle('on', autoZoom);
+    });
+
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false,
       });
       video.srcObject = stream;
+      track = stream.getVideoTracks()[0];
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+        hwZoom = caps.zoom;
+        zoom = track.getSettings().zoom || hwZoom.min;
+        autoZoom = true; // 지원하는 카메라에서만 자동 줌
+        zoomAutoBtn.hidden = false;
+        zoomAutoBtn.classList.add('on');
+      }
+      zoomLbl.textContent = `${zoom.toFixed(1)}×`;
+      document.getElementById('zoomCtl').hidden = false;
     } catch (e) {
-      document.getElementById('camHint').textContent = '카메라를 사용할 수 없습니다. 앨범 또는 샘플을 이용하세요.';
+      hint.textContent = '카메라를 사용할 수 없습니다. 앨범 또는 샘플을 이용하세요.';
       document.getElementById('shutter').disabled = true;
     }
+
+    // 화면에 보이는 부분(object-fit: cover + 디지털 줌)을 영상 좌표로
+    function visibleRect() {
+      const W = viewport.clientWidth, H = viewport.clientHeight, VW = video.videoWidth, VH = video.videoHeight;
+      const s = Math.max(W / VW, H / VH), ox = (W - VW * s) / 2, oy = (H - VH * s) / 2;
+      const z = hwZoom ? 1 : zoom;
+      const toV = (sx, sy) => [((sx - W / 2) / z + W / 2 - ox) / s, ((sy - H / 2) / z + H / 2 - oy) / s];
+      const [x0, y0] = toV(0, 0), [x1, y1] = toV(W, H);
+      const x = Math.max(0, x0), y = Math.max(0, y0);
+      return { x, y, w: Math.min(VW, x1) - x, h: Math.min(VH, y1) - y, s, ox, oy, z, W, H };
+    }
+    const toScreen = (r, [x, y]) => [r.W / 2 + (x * r.s + r.ox - r.W / 2) * r.z, r.H / 2 + (y * r.s + r.oy - r.H / 2) * r.z];
+
+    // ---- 문서 테두리 감지: 0.3초마다 작은 화면으로 찾아 윤곽선과 안내 문구를 보여 준다 ----
+    let shown = null, smallN = 0, edgeN = 0, noneN = 0, paused = false;
+    function tick() {
+      if (paused || !video.videoWidth || document.hidden) return;
+      const r = visibleRect();
+      const found = Scanner.detect(video, r, 240);
+      let state = 'none';
+      if (found) {
+        state = found.touches >= 2 || found.areaRatio > 0.92 ? 'far' : found.areaRatio < 0.28 ? 'near' : 'good';
+        const pts = found.quad.map((p) => toScreen(r, p));
+        shown = shown ? shown.map((p, i) => [p[0] * 0.5 + pts[i][0] * 0.5, p[1] * 0.5 + pts[i][1] * 0.5]) : pts; // 떨림 완화
+        poly.setAttribute('points', shown.map((p) => p.map(Math.round).join(',')).join(' '));
+      } else shown = null;
+      outline.dataset.state = state;
+      frame.classList.toggle('dim', state === 'good');
+      hint.textContent = {
+        none: '문서의 네 모서리를 안내 틀 안에 맞춰 주세요',
+        far: '문서가 화면을 벗어났어요. 조금 멀리서 찍어 주세요',
+        near: '조금 더 가까이 가져가 주세요',
+        good: '좋아요! 그대로 촬영하세요',
+      }[state];
+      hint.classList.toggle('good', state === 'good');
+
+      if (!hwZoom || !autoZoom) return;
+      smallN = state === 'near' && found.touches === 0 ? smallN + 1 : 0;
+      edgeN = state === 'far' ? edgeN + 1 : 0;
+      noneN = state === 'none' ? noneN + 1 : 0;
+      if (smallN >= 4 && zoom < Math.min(hwZoom.max, 3)) { setZoom(zoom * 1.12); smallN = 0; }
+      else if ((edgeN >= 3 || noneN >= 10) && zoom > hwZoom.min) { setZoom(zoom / 1.12); edgeN = 0; noneN = 0; }
+    }
+    camTimer = setInterval(tick, 300);
 
     $view.querySelectorAll('.types button').forEach((b) => b.addEventListener('click', () => {
       docType = b.dataset.type;
       $view.querySelectorAll('.types button').forEach((x) => x.classList.toggle('on', x === b));
     }));
 
-    const go = (dataUrl) => capture(dataUrl, docType, retakeId);
+    // 촬영·선택한 사진 → 영역 조정(기울기 보정·잘라내기) → 중복 확인 → 등록
+    const go = async (dataUrl, { hashSource, skipEditor = false } = {}) => {
+      paused = true;
+      try {
+        let finalUrl = dataUrl;
+        if (!skipEditor) {
+          const r = await Scanner.editor(dataUrl);
+          if (!r) return; // 다시 찍기
+          finalUrl = r.dataUrl;
+        }
+        await capture(finalUrl, docType, retakeId, await sha256Hex(hashSource ?? dataUrl).catch(() => null));
+      } finally {
+        paused = false;
+        cam.classList.remove('flash');
+      }
+    };
 
     document.getElementById('shutter').addEventListener('click', () => {
       if (!video.videoWidth) return;
+      const r = visibleRect(); // 화면에 보이는 영역만 (디지털 줌 포함)
       const c = document.createElement('canvas');
-      c.width = video.videoWidth; c.height = video.videoHeight;
-      c.getContext('2d').drawImage(video, 0, 0);
-      document.querySelector('.camera').classList.add('flash');
+      c.width = Math.round(r.w); c.height = Math.round(r.h);
+      c.getContext('2d').drawImage(video, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+      cam.classList.add('flash');
       go(c.toDataURL('image/jpeg', 0.92));
     });
     const onFile = (e) => {
       const f = e.target.files[0];
+      e.target.value = '';
       if (!f) return;
       const r = new FileReader();
-      r.onload = () => go(r.result);
+      r.onload = async () => go(r.result, { hashSource: await f.arrayBuffer() }); // 같은 파일 판단은 원본 바이트로
       r.readAsDataURL(f);
     };
     document.getElementById('fileInput').addEventListener('change', onFile);
@@ -172,23 +387,34 @@
     document.getElementById('sampleBtn').addEventListener('click', () => { sheet.hidden = false; });
     sheet.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       sheet.hidden = true;
-      if (b.dataset.sample) go(Samples[b.dataset.sample]());
+      if (b.dataset.sample) go(Samples[b.dataset.sample](), { skipEditor: true });
     }));
   }
 
   function stopCamera() {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
+    clearInterval(camTimer);
+    if (onCamResize) window.removeEventListener('resize', onCamResize);
+    onCamResize = null;
     document.body.classList.remove('dark');
   }
 
-  async function capture(dataUrl, docType, retakeId) {
+  async function capture(dataUrl, docType, retakeId, fileHash) {
     const imageUrl = await OCR.downscale(dataUrl);
     let doc;
     if (retakeId) {
-      doc = await DB.setStatus(retakeId, 'processing', { imageUrl, ...(docType !== 'auto' ? { documentType: docType } : {}) });
+      doc = await DB.setStatus(retakeId, 'processing', { imageUrl, fileHash, ...(docType !== 'auto' ? { documentType: docType } : {}) });
     } else {
-      doc = await DB.createDocument({ userId: user.id, documentType: docType, imageUrl });
+      // 같은 파일이 이미 있으면 등록 전에 알린다 (내용 비교는 인식이 끝난 뒤 한 번 더)
+      let duplicateOf = null;
+      const dups = fileHash ? await DB.checkFileDuplicates(fileHash).catch(() => []) : [];
+      if (dups.length) {
+        const c = await duplicateDialog(dups, { stage: 'upload' });
+        if (c.decision === 'cancel') return;
+        duplicateOf = c.duplicateOf;
+      }
+      doc = await DB.createDocument({ documentType: docType, imageUrl, fileHash, duplicateOf });
     }
     location.hash = `#/process/${doc.id}`;
   }
@@ -196,7 +422,7 @@
   // ---------- 인식 처리 ----------
   async function renderProcess(id) {
     const { doc } = await DB.documentBundle(id);
-    const steps = ['촬영 품질 검사', '텍스트 인식 (OCR)', '정보 추출', '데이터 대조'];
+    const steps = ['촬영 품질 검사', '텍스트 인식 (OCR)', '정보 추출', '데이터 대조', '중복 문서 확인'];
     h(`
       <div class="process">
         <div class="scan"><img src="${doc.imageUrl}" alt=""><div class="beam"></div></div>
@@ -235,6 +461,11 @@
       const parsed = Parser.parse(ocr, typeHint, memory);
       if (q.issues.length) parsed.data.qualityIssues = q.issues;
       await DB.saveExtraction(id, parsed.data, parsed.lineItems);
+      // 최초 OCR 결과(글자 상자 포함)와 최초 추출값을 남겨 둔다 → 검수 확정값과 짝지어 학습 데이터가 된다
+      await DB.saveOcrResult(id, {
+        engine: OCR.ENGINE, modelVersion: OCR.MODEL_VERSION, result: OCR.toStored(ocr),
+        parsed: { documentType: parsed.documentType, data: parsed.data, lineItems: parsed.lineItems, fieldBoxes: parsed.fieldBoxes },
+      }).catch((e) => console.warn('OCR 결과 저장 실패', e));
       step(2, 'done', `${parsed.lineItems.length}개 품목`);
       bar(0.92);
 
@@ -243,6 +474,28 @@
       const errors = checks.filter((c) => c.level === 'error').length;
       const warns = checks.filter((c) => c.level === 'warn').length;
       step(3, errors ? 'warn' : 'done', errors || warns ? `오류 ${errors} · 주의 ${warns}` : '모두 일치');
+      bar(0.96);
+
+      // 등록 전 중복 확인: 업로드 단계에서 이미 "중복으로 등록"을 고른 문서는 건너뛴다
+      step(4, 'active');
+      if (doc.duplicateDecision) step(4, 'warn', '중복으로 등록됨');
+      else {
+        const dups = await DB.documentDuplicates(id);
+        if (!dups.length) step(4, 'done', '없음');
+        else {
+          step(4, 'warn', dups.some((d) => d.level === 'exact') ? '정확히 일치' : '중복 가능성');
+          const c = await duplicateDialog(dups, { stage: 'process' });
+          if (c.decision === 'cancel') {
+            await DB.deleteDocument(id);
+            await refreshBadge();
+            toast('등록을 취소했습니다');
+            location.hash = '#/';
+            return;
+          }
+          await DB.setDuplicate(id, c.decision, c.duplicateOf);
+          step(4, 'done', c.decision === 'duplicate' ? '중복으로 등록 (재고 미반영)' : '별개 문서로 등록');
+        }
+      }
       bar(1);
 
       const retakeReason = Parser.needsRetake(parsed.data);
@@ -296,10 +549,7 @@
       </div>
     `);
     document.getElementById('delBtn').addEventListener('click', async () => {
-      if (!confirm('이 문서를 삭제할까요?')) return;
-      await DB.deleteDocument(id);
-      await refreshBadge();
-      location.hash = '#/';
+      if (await confirmDelete(id, b)) location.hash = '#/';
     });
   }
 
@@ -335,8 +585,35 @@
         </label>`;
     };
 
+    // 재고 반영 상태 (거래명세서·세금계산서만)
+    const invCard = () => {
+      if (!INVENTORY_TYPES.includes(doc.documentType)) return '';
+      const inv = b.inventory || [];
+      let body;
+      if (doc.inventoryStatus === 'applied') {
+        body = `<p class="muted">검수 완료된 품목이 재고에 반영되었습니다. 품목명·수량을 고쳐 저장하면 재고도 함께 바뀝니다.</p>
+          <ul class="inv-moves">${inv.map((m) => `<li><a href="#/inventory/${m.itemId}">${esc(m.name)}</a><b>+${qtyLabel(m.quantity)}${esc(m.unit || '')}</b></li>`).join('')}</ul>`;
+      } else if (doc.inventoryStatus === 'skipped_duplicate') {
+        body = '<p class="muted">중복 문서로 등록되어 재고에 반영하지 않았습니다.</p>';
+      } else if (doc.status === 'verified') {
+        body = '<p class="muted">반영할 품목이 없습니다. 품목명과 수량이 있는 줄만 재고에 들어갑니다.</p>';
+      } else {
+        body = '<p class="muted">검수 완료하면 품목명·수량이 있는 품목이 재고에 반영됩니다.</p>';
+      }
+      return `<section class="card"><div class="card-h"><h2>재고 반영</h2></div>${body}</section>`;
+    };
+    const dupCard = () => (doc.duplicateDecision !== 'duplicate' ? '' : `
+      <section class="card dup-card">
+        <div class="card-h"><h2>중복 등록 문서</h2></div>
+        ${b.duplicateOfDoc ? `<p>원본: <a href="#/review/${b.duplicateOfDoc.id}"><b>${esc(b.duplicateOfDoc.vendorName || '상호 미확인')}</b>
+          · ${b.duplicateOfDoc.issueDate || ''} · ${b.duplicateOfDoc.totalAmount != null ? fmt(b.duplicateOfDoc.totalAmount) + '원' : ''}</a></p>` : ''}
+        <p class="muted">이 문서는 재고에 반영되지 않습니다.</p>
+        <button class="btn ghost block" id="notDupBtn">중복 아님 — 별개 문서로 재고에 반영</button>
+      </section>`);
+
     h(`
-      <header class="top"><a href="#/" class="back">‹</a><h1>검수</h1>${badge(doc.status)}</header>
+      <header class="top"><a href="#/" class="back">‹</a><h1>검수</h1>${badge(doc.status)}
+        <button class="del-btn" id="delDoc" aria-label="문서 삭제">삭제</button></header>
       <div class="review">
         <div class="doc-img" id="docImg"><img src="${doc.imageUrl}" alt="촬영 문서"><span>탭하여 확대</span></div>
 
@@ -355,6 +632,7 @@
           <select name="documentType" id="docType">${Object.entries(Parser.DOC_TYPES).filter(([k]) => k !== 'auto')
             .map(([k, v]) => `<option value="${k}" ${k === doc.documentType ? 'selected' : ''}>${v}</option>`).join('')}</select>
         </section>
+        ${dupCard()}
 
         <section class="card">
           <div class="card-h"><h2>추출 정보</h2></div>
@@ -365,6 +643,7 @@
           <div class="card-h"><h2>거래 상세 항목</h2><button class="ghost sm" id="addItem">+ 추가</button></div>
           <div id="items"></div>
         </section>
+        ${invCard()}
 
         <section class="card">
           <div class="card-h"><h2>데이터 대조</h2></div>
@@ -400,9 +679,12 @@
         const bad = itemMismatch(it);
         return `
         <div class="item ${bad ? 'bad' : ''}" data-i="${i}">
-          <input class="name" data-k="itemName" value="${esc(it.itemName)}" placeholder="품목명">
+          <div class="name-row">
+            <input class="name" data-k="itemName" value="${esc(it.itemName)}" placeholder="품목명">
+            <input class="unit" data-k="unit" value="${esc(it.unit)}" placeholder="단위" aria-label="단위">
+          </div>
           <div class="nums">
-            <input data-k="quantity" inputmode="numeric" value="${esc(it.quantity)}" placeholder="수량">
+            <input data-k="quantity" inputmode="decimal" value="${esc(it.quantity)}" placeholder="수량">
             <span>×</span>
             <input data-k="unitPrice" inputmode="numeric" value="${esc(fmt(it.unitPrice))}" placeholder="단가">
             <span>=</span>
@@ -418,7 +700,9 @@
       if (!row) return;
       const it = items[row.dataset.i];
       const k = e.target.dataset.k;
-      it[k] = k === 'itemName' ? e.target.value : Parser.toNumber(e.target.value);
+      // 수량은 소수(1.5kg 등)를 허용하고, 금액은 정수로
+      it[k] = k === 'itemName' || k === 'unit' ? e.target.value
+        : k === 'quantity' ? toQty(e.target.value) : Parser.toNumber(e.target.value);
       if (k === 'quantity' || k === 'unitPrice') {
         if (it.quantity && it.unitPrice) {
           it.amount = it.quantity * it.unitPrice;
@@ -435,7 +719,7 @@
       drawItems(); drawChecks();
     });
     document.getElementById('addItem').addEventListener('click', () => {
-      items.push({ itemName: '', quantity: 1, unitPrice: null, amount: null });
+      items.push({ itemName: '', unit: '', quantity: 1, unitPrice: null, amount: null });
       drawItems();
       $items.querySelector('.item:last-child .name').focus();
     });
@@ -479,8 +763,19 @@
     document.getElementById('docImg').addEventListener('click', () => { zoom.hidden = false; });
     zoom.addEventListener('click', () => { zoom.hidden = true; });
 
+    // 삭제: 확인 창 → 이미지·추출·OCR 결과·학습 데이터 삭제, 재고 반영분 되돌림
+    document.getElementById('delDoc').addEventListener('click', async () => {
+      if (await confirmDelete(id, b)) location.hash = '#/';
+    });
+    document.getElementById('notDupBtn')?.addEventListener('click', async () => {
+      await DB.setDuplicate(id, 'distinct');
+      toast('별개 문서로 바꿨습니다');
+      renderReview(id);
+    });
+
     // 저장: 바뀐 필드마다 ReviewLog를 남긴다
-    document.getElementById('saveBtn').addEventListener('click', async () => {
+    const saveBtn = document.getElementById('saveBtn');
+    saveBtn.addEventListener('click', async () => {
       const cur = current();
       const newType = document.getElementById('docType').value;
       const errors = Parser.validate({ ...ex, ...cur }, items, newType).filter((c) => c.level === 'error');
@@ -493,21 +788,85 @@
         if (String(before ?? '') !== String(after ?? '')) changes.push([key, before, after]);
       }
       if (newType !== doc.documentType) changes.push(['documentType', doc.documentType, newType]);
-      const itemsKey = (arr) => JSON.stringify(arr.map((i) => [i.itemName, +i.quantity || 0, +i.unitPrice || 0, +i.amount || 0]));
+      const itemsKey = (arr) => JSON.stringify(arr.map((i) => [i.itemName, i.unit || '', +i.quantity || 0, +i.unitPrice || 0, +i.amount || 0]));
       if (itemsKey(items) !== itemsKey(b.items)) changes.push(['lineItems', `${b.items.length}개 품목`, `${items.length}개 품목`]);
 
-      for (const [fieldName, o, c] of changes) {
-        await DB.logReview({ documentId: id, reviewerId: user.id, fieldName, originalValue: o, correctedValue: c });
+      saveBtn.disabled = true;
+      try {
+        const { id: _exId, documentId: _d, ...exRest } = ex;
+        const cleanItems = items.filter((i) => i.itemName || i.amount)
+          .map(({ itemName, unit, quantity, unitPrice, amount }) => ({ itemName, unit, quantity, unitPrice, amount }));
+        await DB.saveExtraction(id, { ...exRest, ...cur }, cleanItems);
+
+        // 고친 정보로 중복을 한 번 더 확인 (아직 중복 판단을 내리지 않은 문서만)
+        if (!doc.duplicateDecision) {
+          const dups = await DB.documentDuplicates(id);
+          if (dups.length) {
+            const c = await duplicateDialog(dups, { stage: 'review' });
+            if (c.decision === 'cancel') return;
+            await DB.setDuplicate(id, c.decision, c.duplicateOf);
+          }
+        }
+
+        for (const [fieldName, o, c] of changes) {
+          await DB.logReview({ documentId: id, reviewerId: user.id, fieldName, originalValue: o, correctedValue: c });
+        }
+        // 검수 완료 → 서버가 재고 반영과 학습 데이터(이미지·최초 OCR·확정값) 저장을 함께 처리한다
+        const saved = await DB.setStatus(id, 'verified', { documentType: newType, verifiedBy: user.id, verifiedAt: new Date().toISOString() });
+        await refreshBadge();
+        const invNote = saved.inventoryStatus === 'applied' ? ' · 재고 반영' : saved.inventoryStatus === 'skipped_duplicate' ? ' · 중복이라 재고 미반영' : '';
+        toast((changes.length ? `${changes.length}개 항목을 수정해 저장했습니다` : '검수 완료로 저장했습니다') + invNote);
+        location.hash = '#/';
+      } finally {
+        saveBtn.disabled = false;
       }
-      const { id: _exId, documentId: _d, ...exRest } = ex;
-      const cleanItems = items.filter((i) => i.itemName || i.amount)
-        .map(({ itemName, quantity, unitPrice, amount }) => ({ itemName, quantity, unitPrice, amount }));
-      await DB.saveExtraction(id, { ...exRest, ...cur }, cleanItems);
-      await DB.setStatus(id, 'verified', { documentType: newType, verifiedBy: user.id, verifiedAt: new Date().toISOString() });
-      await refreshBadge();
-      toast(changes.length ? `${changes.length}개 항목을 수정해 저장했습니다` : '검수 완료로 저장했습니다');
-      location.hash = '#/';
     });
+  }
+
+  function toQty(s) {
+    const n = parseFloat(String(s ?? '').replace(/[^\d.]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // ---------- 재고 ----------
+  async function renderInventory() {
+    const list = await DB.inventory();
+    h(`
+      <header class="top"><h1>재고<small class="wp">${esc(user.workplace.hotelName)} · ${esc(user.workplace.name)}</small></h1></header>
+      <div class="review">
+        <p class="muted inv-note">검수 완료된 거래명세서·세금계산서의 품목이 입고로 쌓입니다. 이름이 같은 품목(공백·대소문자 무시)은 하나로 합쳐집니다.</p>
+        ${list.length ? `<input class="search" id="invSearch" placeholder="품목 검색" type="search">` : ''}
+        <ul class="inv-list" id="invList">${list.map((it) => `
+          <li data-name="${esc(it.name.toLowerCase())}"><a href="#/inventory/${it.id}">
+            <div><b>${esc(it.name)}</b><small>입고 ${it.movements}건${it.lastInAt ? ` · 최근 ${dateLabel(it.lastInAt)}` : ''}</small></div>
+            <span class="qty">${qtyLabel(it.quantity)}<em>${esc(it.unit || '')}</em></span>
+          </a></li>`).join('')}</ul>
+        ${list.length ? '' : `<div class="empty"><div class="empty-ico">📦</div><p>아직 재고 품목이 없습니다.<br>거래명세서를 촬영해 검수 완료하면 자동으로 쌓입니다.</p></div>`}
+      </div>
+    `);
+    document.getElementById('invSearch')?.addEventListener('input', (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll('#invList li').forEach((li) => { li.hidden = q && !li.dataset.name.includes(q); });
+    });
+  }
+
+  async function renderInventoryItem(itemId) {
+    const { item, movements } = await DB.inventoryItem(itemId);
+    h(`
+      <header class="top"><a href="#/inventory" class="back">‹</a><h1>${esc(item.name)}</h1></header>
+      <div class="review">
+        <section class="card inv-head"><span>현재 재고</span><b>${qtyLabel(item.quantity)}<em>${esc(item.unit || '')}</em></b></section>
+        <section class="card">
+          <div class="card-h"><h2>입고 내역</h2></div>
+          <ul class="inv-moves">${movements.map((m) => `
+            <li>${m.documentId ? `<a href="#/review/${m.documentId}">` : '<span>'}
+              <span><b>${esc(m.vendorName || '상호 미확인')}</b>
+                <small>${m.issueDate || dateLabel(m.createdAt)}${m.documentNumber ? ` · ${esc(m.documentNumber)}` : ''} · ${esc(m.itemName)}</small></span>
+              <b class="plus">+${qtyLabel(m.quantity)}${esc(item.unit || '')}</b>
+            ${m.documentId ? '</a>' : '</span>'}</li>`).join('')}</ul>
+        </section>
+      </div>
+    `);
   }
 
   function fieldLabel(f) {
@@ -534,7 +893,13 @@
   // ---------- 로그인 / 가입 ----------
   async function renderLogin(params) {
     const mode = params.get('mode') === 'signup' ? 'signup' : 'login';
-    const cfg = mode === 'signup' ? await DB.authConfig().catch(() => ({})) : {};
+    const signupFields = `
+      <label class="field"><span class="lbl">업장 가입 코드</span>
+        <input name="code" autocomplete="off" autocapitalize="characters" placeholder="ABCD-EFGH" required value="${esc(params.get('code') || '')}">
+        <small id="codeMsg" class="code-msg">업장 관리자에게 받은 코드를 입력하세요</small></label>
+      <label class="field"><span class="lbl">호텔명</span><input name="hotelName" autocomplete="organization" required></label>
+      <label class="field"><span class="lbl">업장명</span><input name="workplaceName" placeholder="예: 객실관리팀, 1층 레스토랑" required></label>
+      <label class="field"><span class="lbl">이름</span><input name="name" autocomplete="name" required></label>`;
     h(`
       <div class="auth">
         <img class="auth-logo" src="/icons/icon-192.png" alt="">
@@ -545,16 +910,44 @@
           <a href="#/login?mode=signup" class="${mode === 'signup' ? 'on' : ''}">회원가입</a>
         </div>
         <form id="authForm" class="auth-form">
-          ${mode === 'signup' ? '<label class="field"><span class="lbl">이름</span><input name="name" autocomplete="name" required></label>' : ''}
+          ${mode === 'signup' ? signupFields : ''}
           <label class="field"><span class="lbl">이메일</span><input name="email" type="email" autocomplete="email" inputmode="email" required></label>
           <label class="field"><span class="lbl">비밀번호${mode === 'signup' ? ' (8자 이상)' : ''}</span>
             <input name="password" type="password" minlength="${mode === 'signup' ? 8 : 1}" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}" required></label>
-          ${cfg.signupCodeRequired ? '<label class="field"><span class="lbl">초대 코드</span><input name="code" autocomplete="off" required></label>' : ''}
           <p class="form-err" id="authErr" hidden></p>
           <button class="btn primary" type="submit">${mode === 'signup' ? '가입하고 시작하기' : '로그인'}</button>
         </form>
       </div>
     `);
+    if (mode === 'signup') {
+      // 코드를 입력하면 어느 업장의 코드인지 확인하고 호텔명·업장명을 채워 준다 (서버가 가입 때 다시 검증)
+      const form = document.getElementById('authForm');
+      const msg = document.getElementById('codeMsg');
+      let lastCode = '';
+      const check = async () => {
+        const raw = form.code.value.trim();
+        const norm = raw.toUpperCase().replace(/[^0-9A-Z]/g, '');
+        if (!norm || norm === lastCode) return;
+        lastCode = norm;
+        try {
+          const r = await DB.checkCode(raw);
+          if (r.newWorkplace) {
+            msg.textContent = '새 업장 개설 코드입니다. 호텔명·업장명을 입력하면 그 업장의 관리자로 가입됩니다';
+          } else {
+            form.hotelName.value = r.hotelName;
+            form.workplaceName.value = r.workplaceName;
+            msg.textContent = `✓ ${r.hotelName} · ${r.workplaceName} 업장의 코드입니다`;
+          }
+          msg.className = 'code-msg ok';
+        } catch (e) {
+          msg.textContent = e.message;
+          msg.className = 'code-msg bad';
+        }
+      };
+      form.code.addEventListener('change', check);
+      form.code.addEventListener('blur', check);
+      if (form.code.value) check();
+    }
     document.getElementById('authForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(e.target));
@@ -575,8 +968,22 @@
   }
 
   // ---------- 내 정보 ----------
-  function renderMe() {
+  const fmtCode = (c) => `${c.slice(0, 4)}-${c.slice(4)}`;
+  function codeState(c) {
+    if (!c.active) return ['중지됨', 'off'];
+    if (c.expiresAt && new Date(c.expiresAt) < new Date()) return ['만료', 'off'];
+    if (c.maxUses != null && c.useCount >= c.maxUses) return ['사용 완료', 'off'];
+    return ['사용 가능', 'on'];
+  }
+  const FIELD_NAMES = { documentType: '문서 종류', lineItems: '품목' };
+
+  async function renderMe() {
     const st = installState();
+    const isAdmin = user.role === 'admin';
+    const [wp, stats] = await Promise.all([
+      DB.workplace(),
+      isAdmin ? DB.trainingStats().catch(() => null) : null,
+    ]);
     h(`
       <header class="top"><a href="#/" class="back">‹</a><h1>내 정보</h1></header>
       <div class="review">
@@ -584,6 +991,62 @@
           <span class="avatar lg">${esc((user.name || '?').slice(0, 1))}</span>
           <div><b>${esc(user.name)}</b><p class="muted">${esc(user.email)}</p></div>
         </section>
+
+        <section class="card">
+          <div class="card-h"><h2>소속 업장</h2><span class="badge ${isAdmin ? 'st-ok' : 'st-proc'}">${isAdmin ? '관리자' : '구성원'}</span></div>
+          <p class="wp-name"><b>${esc(user.workplace.hotelName)}</b> · ${esc(user.workplace.name)}</p>
+          <p class="muted">같은 업장 구성원끼리만 문서·재고를 함께 봅니다. 다른 업장의 데이터는 보이지 않습니다.</p>
+          <details class="members"><summary>구성원 ${wp.members.length}명</summary>
+            <ul>${wp.members.map((m) => `<li>${esc(m.name)} <small>${esc(m.email)}${m.role === 'admin' ? ' · 관리자' : ''}</small></li>`).join('')}</ul>
+          </details>
+          ${isAdmin ? `
+          <details class="members"><summary>업장 정보 수정</summary>
+            <form id="wpForm" class="wp-form">
+              <label class="field"><span class="lbl">호텔명</span><input name="hotelName" value="${esc(user.workplace.hotelName)}" required></label>
+              <label class="field"><span class="lbl">업장명</span><input name="name" value="${esc(user.workplace.name)}" required></label>
+              <button class="btn ghost block">저장</button>
+            </form>
+          </details>` : ''}
+        </section>
+
+        ${isAdmin ? `
+        <section class="card">
+          <div class="card-h"><h2>가입 코드</h2></div>
+          <p class="muted">새 구성원은 이 코드와 호텔명·업장명을 입력해 가입합니다.</p>
+          <form id="codeForm" class="code-form">
+            <select name="expiresInDays"><option value="7">7일 유효</option><option value="30" selected>30일 유효</option><option value="">기한 없음</option></select>
+            <select name="maxUses"><option value="1">1회용</option><option value="10" selected>10명까지</option><option value="">제한 없음</option></select>
+            <button class="btn primary">코드 발급</button>
+          </form>
+          <ul class="codes">${wp.codes.map((c) => {
+            const [label, cls] = codeState(c);
+            return `<li class="${cls}">
+              <code>${fmtCode(c.code)}</code>
+              <span><em>${label}</em><small>${c.useCount}${c.maxUses != null ? `/${c.maxUses}` : ''}명 가입${c.expiresAt ? ` · ${new Date(c.expiresAt).toLocaleDateString('ko-KR')}까지` : ''}</small></span>
+              ${cls === 'on' ? `<button class="ghost sm" data-copy="${c.code}">복사</button><button class="ghost sm" data-revoke="${c.id}">중지</button>` : ''}
+            </li>`;
+          }).join('') || '<li class="muted">발급한 코드가 없습니다.</li>'}</ul>
+        </section>
+
+        <section class="card">
+          <div class="card-h"><h2>OCR 학습 데이터</h2></div>
+          <p class="muted">사람이 검수 완료한 문서마다 원본 이미지·최초 OCR 결과·확정값을 묶어 저장합니다.
+            <b>저장만으로 인식 모델이 학습되지는 않습니다.</b> 내보낸 파일을 tools/training으로 학습셋으로 바꿔 별도로 학습해야 합니다.</p>
+          ${stats && stats.byType.length ? `
+          <table class="tstats"><thead><tr><th>문서 종류</th><th>문서</th><th>수정한 항목</th></tr></thead><tbody>
+            ${stats.byType.map((t) => `<tr><td>${typeLabel(t.documentType)}</td><td>${t.samples}</td><td>${t.corrections}</td></tr>`).join('')}
+          </tbody></table>
+          <details class="members"><summary>항목별 오인식률</summary>
+            <table class="tstats"><thead><tr><th>종류</th><th>항목</th><th>수정/전체</th></tr></thead><tbody>
+              ${stats.byField.map((f) => `<tr><td>${typeLabel(f.documentType)}</td><td>${esc(FIELD_NAMES[f.fieldName] || fieldLabel(f.fieldName))}</td>
+                <td>${f.corrected}/${f.total} (${Math.round((f.corrected / f.total) * 100)}%)</td></tr>`).join('')}
+            </tbody></table>
+          </details>
+          <div class="code-form">
+            <select id="trainType"><option value="">전체 종류</option>${stats.byType.map((t) => `<option value="${t.documentType}">${typeLabel(t.documentType)}</option>`).join('')}</select>
+            <button class="btn ghost" id="trainExport">학습 데이터 내보내기</button>
+          </div>` : '<p class="muted">아직 검수 완료한 문서가 없습니다.</p>'}
+        </section>` : ''}
         <section class="card">
           <div class="card-h"><h2>홈 화면에 설치</h2></div>
           ${st === 'installed' ? '<p class="muted">앱으로 설치되어 실행 중입니다.</p>'
@@ -608,13 +1071,62 @@
       installPrompt = null;
       renderMe();
     });
-    document.getElementById('exportBtn').addEventListener('click', async () => {
-      const data = await DB.exportAll();
+    const download = (data, name) => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `chalkak-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = name;
       a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    };
+    document.getElementById('exportBtn').addEventListener('click', async () => {
+      download(await DB.exportAll(), `chalkak-${new Date().toISOString().slice(0, 10)}.json`);
+    });
+
+    // ---- 관리자: 업장 정보·가입 코드·학습 데이터 ----
+    document.getElementById('wpForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      user = await DB.updateWorkplace(Object.fromEntries(new FormData(e.target)));
+      toast('업장 정보를 저장했습니다');
+      renderMe();
+    });
+    document.getElementById('codeForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      const c = await DB.issueCode({ expiresInDays: f.expiresInDays || null, maxUses: f.maxUses || null });
+      toast(`가입 코드 ${fmtCode(c.code)} 발급`);
+      renderMe();
+    });
+    $view.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
+      const text = `${user.workplace.hotelName} · ${user.workplace.name} 가입 코드: ${fmtCode(b.dataset.copy)}`;
+      try { await navigator.clipboard.writeText(text); toast('복사했습니다'); } catch { prompt('코드를 복사하세요', text); }
+    }));
+    $view.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
+      const ok = await dialog({
+        title: '가입 코드를 중지할까요?', body: '<p>중지한 코드로는 더 이상 가입할 수 없습니다. 이미 가입한 구성원은 그대로입니다.</p>',
+        actions: [{ label: '취소', value: false }, { label: '중지', value: true, cls: 'danger-fill' }],
+      });
+      if (!ok) return;
+      await DB.revokeCode(b.dataset.revoke);
+      renderMe();
+    }));
+    // 이미지가 들어 있어 커질 수 있으므로 50건씩 나눠 파일로 받는다
+    document.getElementById('trainExport')?.addEventListener('click', async (e) => {
+      const btn = e.target;
+      const documentType = document.getElementById('trainType').value;
+      btn.disabled = true;
+      try {
+        for (let offset = 0, part = 1; ; offset += 50, part++) {
+          btn.textContent = `내보내는 중… (${part})`;
+          const page = await DB.trainingExport({ documentType, limit: 50, offset });
+          if (!page.samples.length) break;
+          download(page, `chalkak-training-${documentType || 'all'}-${new Date().toISOString().slice(0, 10)}-${String(part).padStart(3, '0')}.json`);
+          if (offset + page.samples.length >= page.total) break;
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '학습 데이터 내보내기';
+      }
     });
     document.getElementById('logoutBtn').addEventListener('click', async () => {
       await DB.logout();
@@ -644,6 +1156,7 @@
       case 'retake': return renderRetake(parts[1]);
       case 'review': return renderReview(parts[1]);
       case 'queue': return renderList('queue');
+      case 'inventory': return parts[1] ? renderInventoryItem(parts[1]) : renderInventory();
       default: return renderList('home');
     }
   }
