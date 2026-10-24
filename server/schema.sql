@@ -239,3 +239,25 @@ CREATE TABLE IF NOT EXISTS training_fields (
   box             jsonb                             -- 값이 읽힌 글자 상자 [x0,y0,x1,y1] (ocr_results.image_id 기준)
 );
 CREATE INDEX IF NOT EXISTS training_fields_lookup_idx ON training_fields (workplace_id, document_type, field_name);
+
+-- ================================================================
+-- 휴대폰 번호 + 문자 인증 (가입 시 필수, 기존 회원은 비어 있음)
+-- ================================================================
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone text;                  -- 숫자만 (01012345678)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS users_phone_idx ON users (phone) WHERE phone IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS phone_verifications (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone       text NOT NULL,
+  code_hash   text NOT NULL,                        -- 인증번호의 해시 (원문은 저장하지 않음)
+  attempts    int NOT NULL DEFAULT 0,               -- 틀린 횟수 (5회면 무효)
+  expires_at  timestamptz NOT NULL,                 -- 발송 후 3분
+  verified_at timestamptz,
+  token_hash  text,                                 -- 인증 성공 시 발급한 가입용 토큰의 해시
+  used_at     timestamptz,                          -- 가입에 쓴 시각 (한 번만 쓸 수 있음)
+  ip          text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS phone_verifications_phone_idx ON phone_verifications (phone, created_at DESC);
+CREATE INDEX IF NOT EXISTS phone_verifications_ip_idx ON phone_verifications (ip, created_at DESC);

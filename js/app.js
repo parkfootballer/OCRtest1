@@ -898,8 +898,22 @@
         <input name="code" autocomplete="off" autocapitalize="characters" placeholder="ABCD-EFGH" required value="${esc(params.get('code') || '')}">
         <small id="codeMsg" class="code-msg">업장 관리자에게 받은 코드를 입력하세요</small></label>
       <label class="field"><span class="lbl">호텔명</span><input name="hotelName" autocomplete="organization" required></label>
-      <label class="field"><span class="lbl">업장명</span><input name="workplaceName" placeholder="예: 객실관리팀, 1층 레스토랑" required></label>
-      <label class="field"><span class="lbl">이름</span><input name="name" autocomplete="name" required></label>`;
+      <label class="field"><span class="lbl">이름</span><input name="name" autocomplete="name" required></label>
+      <div class="field">
+        <span class="lbl">휴대폰 번호</span>
+        <div class="with-btn">
+          <input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="010-0000-0000" maxlength="13" required>
+          <button type="button" class="btn ghost" id="sendCode">인증번호 받기</button>
+        </div>
+      </div>
+      <div class="field" id="otpField" hidden>
+        <span class="lbl">인증번호</span>
+        <div class="with-btn">
+          <input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6자리">
+          <button type="button" class="btn ghost" id="verifyCode">확인</button>
+        </div>
+        <small id="phoneMsg" class="code-msg"></small>
+      </div>`;
     h(`
       <div class="auth">
         <img class="auth-logo" src="/icons/icon-192.png" alt="">
@@ -915,14 +929,72 @@
           <label class="field"><span class="lbl">비밀번호${mode === 'signup' ? ' (8자 이상)' : ''}</span>
             <input name="password" type="password" minlength="${mode === 'signup' ? 8 : 1}" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}" required></label>
           <p class="form-err" id="authErr" hidden></p>
-          <button class="btn primary" type="submit">${mode === 'signup' ? '가입하고 시작하기' : '로그인'}</button>
+          <button class="btn primary" type="submit" id="authSubmit">${mode === 'signup' ? '가입하고 시작하기' : '로그인'}</button>
         </form>
       </div>
     `);
+    let phoneToken = null; // 문자 인증 성공 시 받은 가입용 토큰
+    let verifiedPhone = null;
     if (mode === 'signup') {
-      // 코드를 입력하면 어느 업장의 코드인지 확인하고 호텔명·업장명을 채워 준다 (서버가 가입 때 다시 검증)
+      // 코드를 입력하면 어느 업장의 코드인지 확인하고 호텔명을 채워 준다 (업장은 코드로 정해지고, 서버가 가입 때 다시 검증)
       const form = document.getElementById('authForm');
       const msg = document.getElementById('codeMsg');
+
+      // ---- 휴대폰 문자 인증 ----
+      const digitsOf = (s) => s.replace(/\D/g, '');
+      const phoneMsg = document.getElementById('phoneMsg');
+      const sendBtn = document.getElementById('sendCode');
+      const setPhoneMsg = (text, cls = '') => { phoneMsg.textContent = text; phoneMsg.className = `code-msg ${cls}`; };
+      let timer = null;
+      form.phone.addEventListener('input', () => {
+        const d = digitsOf(form.phone.value).slice(0, 11);
+        form.phone.value = d.length > 7 ? `${d.slice(0, 3)}-${d.slice(3, d.length - 4)}-${d.slice(-4)}` : d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
+        if (verifiedPhone && digitsOf(form.phone.value) !== verifiedPhone) { // 번호를 바꾸면 다시 인증
+          phoneToken = null; verifiedPhone = null;
+          form.otp.disabled = false; document.getElementById('verifyCode').disabled = false;
+          setPhoneMsg('번호가 바뀌어 다시 인증해야 합니다', 'bad');
+        }
+      });
+      sendBtn.addEventListener('click', async () => {
+        const phone = digitsOf(form.phone.value);
+        document.getElementById('otpField').hidden = false;
+        if (!/^01[016789]\d{7,8}$/.test(phone)) return setPhoneMsg('휴대폰 번호를 정확히 입력하세요', 'bad');
+        sendBtn.disabled = true;
+        try {
+          const r = await DB.sendPhoneCode(phone);
+          let left = r.expiresIn;
+          clearInterval(timer);
+          const tick = () => {
+            if (phoneToken) return clearInterval(timer);
+            if (left <= 0) { clearInterval(timer); return setPhoneMsg('인증번호가 만료되었습니다. 다시 받아 주세요', 'bad'); }
+            setPhoneMsg(`문자로 받은 인증번호를 입력하세요 (${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')})${r.devCode ? ` · 개발용 번호 ${r.devCode}` : ''}`);
+            left--;
+          };
+          tick();
+          timer = setInterval(tick, 1000);
+          sendBtn.textContent = '다시 받기';
+          form.otp.focus();
+          setTimeout(() => { sendBtn.disabled = false; }, 60_000); // 서버 제한과 같은 1분
+        } catch (ex) {
+          setPhoneMsg(ex.message, 'bad');
+          sendBtn.disabled = false;
+        }
+      });
+      document.getElementById('verifyCode').addEventListener('click', async () => {
+        const phone = digitsOf(form.phone.value);
+        try {
+          const r = await DB.verifyPhoneCode(phone, form.otp.value.trim());
+          phoneToken = r.verificationToken;
+          verifiedPhone = phone;
+          clearInterval(timer);
+          form.otp.disabled = true;
+          document.getElementById('verifyCode').disabled = true;
+          setPhoneMsg('✓ 휴대폰 인증이 완료되었습니다', 'ok');
+        } catch (ex) {
+          setPhoneMsg(ex.message, 'bad');
+        }
+      });
+
       let lastCode = '';
       const check = async () => {
         const raw = form.code.value.trim();
@@ -932,10 +1004,9 @@
         try {
           const r = await DB.checkCode(raw);
           if (r.newWorkplace) {
-            msg.textContent = '새 업장 개설 코드입니다. 호텔명·업장명을 입력하면 그 업장의 관리자로 가입됩니다';
+            msg.textContent = '새 업장 개설 코드입니다. 입력한 호텔에 "기본 업장"이 만들어지고 관리자로 가입됩니다 (업장명은 내 정보에서 변경)';
           } else {
             form.hotelName.value = r.hotelName;
-            form.workplaceName.value = r.workplaceName;
             msg.textContent = `✓ ${r.hotelName} · ${r.workplaceName} 업장의 코드입니다`;
           }
           msg.className = 'code-msg ok';
@@ -951,12 +1022,19 @@
     document.getElementById('authForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(e.target));
-      const btn = e.target.querySelector('button');
+      const btn = document.getElementById('authSubmit');
       const err = document.getElementById('authErr');
+      if (mode === 'signup' && !phoneToken) {
+        err.textContent = '휴대폰 문자 인증을 먼저 완료하세요';
+        err.hidden = false;
+        return;
+      }
       btn.disabled = true;
       err.hidden = true;
       try {
-        user = mode === 'signup' ? await DB.signup(f) : await DB.login(f.email, f.password);
+        user = mode === 'signup'
+          ? await DB.signup({ email: f.email, password: f.password, name: f.name, code: f.code, hotelName: f.hotelName, phone: verifiedPhone, phoneToken })
+          : await DB.login(f.email, f.password);
         await refreshBadge();
         location.hash = '#/';
       } catch (ex) {
@@ -989,7 +1067,7 @@
       <div class="review">
         <section class="card profile">
           <span class="avatar lg">${esc((user.name || '?').slice(0, 1))}</span>
-          <div><b>${esc(user.name)}</b><p class="muted">${esc(user.email)}</p></div>
+          <div><b>${esc(user.name)}</b><p class="muted">${esc(user.email)}${user.phone ? ` · ${esc(user.phone.replace(/^(\d{3})(\d{3,4})(\d{4})$/, '$1-$2-$3'))}` : ''}</p></div>
         </section>
 
         <section class="card">

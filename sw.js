@@ -1,6 +1,6 @@
 // 서비스 워커: 앱 셸은 미리 캐시해 즉시 열리게 하고, OCR 엔진·한국어 모델(CDN)은 한 번 받으면 재사용한다.
 // 앱 파일을 바꿨다면 VERSION을 올려야 휴대폰에 새 버전이 반영된다.
-const VERSION = 'v3'; // v3: 업장·재고·중복 감지·문서 영역 보정
+const VERSION = 'v4'; // v4: 가입 시 휴대폰 문자 인증
 const SHELL = `shell-${VERSION}`;
 const OCR_CACHE = 'ocr-assets-v2'; // v2: Tesseract → PaddleOCR 모델(/models/)
 

@@ -17,6 +17,15 @@ services:
       - key: SIGNUP_CODE   # 새 업장 개설 코드: 이 코드로 가입하면 입력한 호텔·업장이 새로 만들어지고 관리자가 된다.
                            # 이후 구성원은 그 업장 관리자가 발급한 업장 가입 코드로 가입한다 (Render가 처음에 입력을 요청)
         sync: false
+      # 가입 문자 인증 (server/sms.js). 설정하지 않으면 운영 환경에서는 인증번호를 보낼 수 없어 가입이 막힌다
+      - key: SMS_PROVIDER  # solapi 또는 twilio
+        sync: false
+      - key: SMS_FROM      # 문자 업체에 등록한 발신번호
+        sync: false
+      - key: SOLAPI_API_KEY
+        sync: false
+      - key: SOLAPI_API_SECRET
+        sync: false
 
 databases:
   - name: chalkak-db

@@ -10,6 +10,7 @@ const { findDuplicates } = require('./duplicates');
 const { syncInventory, documentMovements } = require('./inventory');
 const { upsertTrainingSample, trainingStats, exportSamples } = require('./training');
 const { generateCode, normCode, nameKey } = require('./codes');
+const sms = require('./sms');
 
 // DATE는 'YYYY-MM-DD' 문자열, BIGINT·NUMERIC은 숫자로 받는다
 types.setTypeParser(1082, (v) => v);
@@ -32,7 +33,7 @@ const DOC_TYPES = ['auto', 'giro', 'bill', 'invoice', 'tax_invoice'];
 
 // ---------- 행 → API(camelCase) 변환 ----------
 const toUser = (r) => r && {
-  id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at,
+  id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at, phone: r.phone || null,
   workplace: { id: r.workplace_id, hotelName: r.hotel_name, name: r.workplace_name },
 };
 const toDoc = (r) => r && {
@@ -282,44 +283,122 @@ app.post('/api/auth/check-code', wrap(async (req, res) => {
   res.json({ valid: true, newWorkplace: false, hotelName: r.hotel_name, workplaceName: r.workplace_name });
 }));
 
+// ---------- 휴대폰 문자 인증 ----------
+// 1) 인증번호 받기 → 2) 인증번호 확인(가입용 토큰 발급, 30분 유효) → 3) 가입 때 토큰 제출(한 번만 사용)
+const CODE_TTL_SEC = 180;
+const normPhone = (s) => String(s || '').replace(/\D/g, '');
+const isMobile = (p) => /^01[016789]\d{7,8}$/.test(p);
+const hashCode = (salt, code) => `${salt}:${sha256(`${salt}:${code}`)}`;
+
+app.post('/api/auth/phone/send', wrap(async (req, res) => {
+  const phone = normPhone(req.body?.phone);
+  if (!isMobile(phone)) throw new HttpError(400, '휴대폰 번호 형식이 올바르지 않습니다');
+  if (!sms.configured()) throw new HttpError(503, '문자 발송이 설정되지 않았습니다. 관리자에게 문의하세요');
+  if ((await pool.query('SELECT 1 FROM users WHERE phone = $1', [phone])).rows[0]) throw new HttpError(409, '이미 가입된 휴대폰 번호입니다');
+  // 발송 제한: 같은 번호 1분에 1회·1시간에 5회, 같은 IP 1시간에 20회
+  const { rows: [lim] } = await pool.query(
+    `SELECT count(*) FILTER (WHERE phone = $1 AND created_at > now() - interval '1 minute')::int AS recent,
+            count(*) FILTER (WHERE phone = $1)::int AS phone_hour,
+            count(*) FILTER (WHERE ip = $2)::int AS ip_hour
+       FROM phone_verifications WHERE created_at > now() - interval '1 hour' AND (phone = $1 OR ip = $2)`,
+    [phone, req.ip],
+  );
+  if (lim.recent) throw new HttpError(429, '잠시 후 다시 요청하세요 (1분에 한 번)');
+  if (lim.phone_hour >= 5 || lim.ip_hour >= 20) throw new HttpError(429, '인증번호 요청이 너무 많습니다. 1시간 뒤 다시 시도하세요');
+
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  const { rows: [row] } = await pool.query(
+    `INSERT INTO phone_verifications (phone, code_hash, expires_at, ip)
+     VALUES ($1, $2, now() + make_interval(secs => $3), $4) RETURNING id`,
+    [phone, hashCode(crypto.randomBytes(8).toString('hex'), code), CODE_TTL_SEC, req.ip],
+  );
+  try {
+    await sms.sendSms(phone, `[찰칵장부] 인증번호 ${code} (3분 안에 입력)`);
+  } catch (e) {
+    console.error('문자 발송 실패:', e.message);
+    await pool.query('DELETE FROM phone_verifications WHERE id = $1', [row.id]);
+    throw new HttpError(502, '문자를 보내지 못했습니다. 번호를 확인하고 다시 시도하세요');
+  }
+  // 개발용(console) 발송일 때만 화면에서 시험할 수 있도록 번호를 돌려준다
+  res.json({ expiresIn: CODE_TTL_SEC, ...(sms.isConsole() && process.env.NODE_ENV !== 'production' ? { devCode: code } : {}) });
+}));
+
+app.post('/api/auth/phone/verify', wrap(async (req, res) => {
+  const phone = normPhone(req.body?.phone);
+  const code = String(req.body?.code || '').trim();
+  const token = await withTx(async (c) => {
+    const { rows: [v] } = await c.query(
+      `SELECT * FROM phone_verifications WHERE phone = $1 AND verified_at IS NULL
+        ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      [phone],
+    );
+    if (!v || new Date(v.expires_at) < new Date()) throw new HttpError(400, '인증번호가 만료되었습니다. 다시 받아 주세요');
+    if (v.attempts >= 5) throw new HttpError(429, '5회 틀렸습니다. 인증번호를 다시 받아 주세요');
+    const [salt, hash] = v.code_hash.split(':');
+    const ok = /^\d{6}$/.test(code)
+      && crypto.timingSafeEqual(Buffer.from(hashCode(salt, code).split(':')[1], 'hex'), Buffer.from(hash, 'hex'));
+    if (!ok) {
+      await c.query('UPDATE phone_verifications SET attempts = attempts + 1 WHERE id = $1', [v.id]);
+      return null; // 시도 횟수는 반영하고 오류는 트랜잭션 밖에서
+    }
+    const t = crypto.randomBytes(32).toString('base64url');
+    await c.query('UPDATE phone_verifications SET verified_at = now(), token_hash = $1 WHERE id = $2', [sha256(t), v.id]);
+    return t;
+  });
+  if (!token) throw new HttpError(400, '인증번호가 맞지 않습니다');
+  res.json({ verificationToken: token });
+}));
+
 app.post('/api/auth/signup', wrap(async (req, res) => {
   rateLimit(req);
-  const { email, name, password, code, hotelName, workplaceName } = req.body || {};
+  const { email, name, password, code, hotelName, phoneToken } = req.body || {};
   const mail = String(email || '').trim().toLowerCase();
   const hotel = String(hotelName || '').trim();
-  const wpName = String(workplaceName || '').trim();
+  const phone = normPhone(req.body?.phone);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) throw new HttpError(400, '이메일 형식이 올바르지 않습니다');
   if (!name || !String(name).trim()) throw new HttpError(400, '이름을 입력하세요');
   if (String(password || '').length < 8) throw new HttpError(400, '비밀번호는 8자 이상이어야 합니다');
-  if (!hotel || !wpName) throw new HttpError(400, '호텔명과 업장명을 입력하세요');
-  if (hotel.length > 80 || wpName.length > 80) throw new HttpError(400, '호텔명·업장명이 너무 깁니다');
+  if (!hotel) throw new HttpError(400, '호텔명을 입력하세요');
+  if (hotel.length > 80) throw new HttpError(400, '호텔명이 너무 깁니다');
+  if (!isMobile(phone) || !phoneToken) throw new HttpError(400, '휴대폰 문자 인증을 완료하세요');
 
   const userId = await withTx(async (c) => {
     if ((await c.query('SELECT 1 FROM users WHERE email = $1', [mail])).rows[0]) throw new HttpError(409, '이미 가입된 이메일입니다');
+    if ((await c.query('SELECT 1 FROM users WHERE phone = $1', [phone])).rows[0]) throw new HttpError(409, '이미 가입된 휴대폰 번호입니다');
+    // 문자 인증: 같은 번호로 30분 안에 인증받은, 아직 쓰지 않은 토큰이어야 한다
+    const { rows: [pv] } = await c.query(
+      `SELECT id FROM phone_verifications
+        WHERE phone = $1 AND token_hash = $2 AND used_at IS NULL AND verified_at > now() - interval '30 minutes'
+        FOR UPDATE`,
+      [phone, sha256(String(phoneToken))],
+    );
+    if (!pv) throw new HttpError(400, '휴대폰 인증이 만료되었습니다. 다시 인증해 주세요');
+    await c.query('UPDATE phone_verifications SET used_at = now() WHERE id = $1', [pv.id]);
+
     let workplaceId;
     let role = 'member';
     if (isMasterCode(code)) {
-      // 새 업장 개설: 같은 호텔에 같은 이름의 업장이 이미 있으면 그 업장 관리자에게 코드를 받아야 한다
+      // 새 업장 개설: 업장명은 '기본 업장'으로 만들고 관리자가 내 정보에서 바꾼다
       const { rows } = await c.query(
-        `INSERT INTO workplaces (hotel_name, name) VALUES ($1, $2)
+        `INSERT INTO workplaces (hotel_name, name) VALUES ($1, '기본 업장')
          ON CONFLICT (hotel_key, name_key) DO NOTHING RETURNING id`,
-        [hotel, wpName],
+        [hotel],
       );
-      if (!rows[0]) throw new HttpError(409, '이미 등록된 업장입니다. 업장 관리자에게 가입 코드를 받아 가입하세요');
+      if (!rows[0]) throw new HttpError(409, '이미 등록된 호텔입니다. 업장 관리자에게 가입 코드를 받아 가입하세요');
       workplaceId = rows[0].id;
       role = 'admin';
     } else {
+      // 업장은 가입 코드로 정해진다. 호텔명은 코드의 호텔과 맞는지만 확인한다
       const sc = await usableCode(c, code, true);
-      if (nameKey(sc.hotel_name) !== nameKey(hotel) || nameKey(sc.workplace_name) !== nameKey(wpName)) {
-        throw new HttpError(400, '가입 코드의 호텔명·업장명과 입력한 정보가 다릅니다');
-      }
+      if (nameKey(sc.hotel_name) !== nameKey(hotel)) throw new HttpError(400, '가입 코드의 호텔명과 입력한 호텔명이 다릅니다');
       await c.query('UPDATE signup_codes SET use_count = use_count + 1 WHERE id = $1', [sc.id]);
       workplaceId = sc.workplace_id;
     }
     const { rows } = await c.query(
-      `INSERT INTO users (email, name, password_hash, workplace_id, role) VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO users (email, name, password_hash, workplace_id, role, phone, phone_verified_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
        ON CONFLICT (email) DO NOTHING RETURNING id`,
-      [mail, String(name).trim(), await hashPassword(password), workplaceId, role],
+      [mail, String(name).trim(), await hashPassword(password), workplaceId, role, phone],
     );
     if (!rows[0]) throw new HttpError(409, '이미 가입된 이메일입니다');
     return rows[0].id;
@@ -347,7 +426,9 @@ app.post('/api/auth/logout', wrap(async (req, res) => {
 }));
 
 // 가입에는 항상 업장 가입 코드가 필요하다
-app.get('/api/auth/config', (req, res) => res.json({ signupCodeRequired: true, canCreateWorkplace: !!SIGNUP_CODE }));
+app.get('/api/auth/config', (req, res) => res.json({
+  signupCodeRequired: true, canCreateWorkplace: !!SIGNUP_CODE, phoneVerification: true, smsConfigured: sms.configured(),
+}));
 
 // 이하 모든 API는 로그인 필요
 app.use('/api', requireUser);

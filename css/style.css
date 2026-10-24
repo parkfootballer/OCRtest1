@@ -230,6 +230,10 @@ button, input, select { font: inherit; color: inherit; }
 .code-msg { color: var(--muted) !important; }
 .code-msg.ok { color: var(--ok) !important; }
 .code-msg.bad { color: var(--err) !important; }
+.with-btn { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.with-btn .btn { height: 46px; padding: 0 14px; font-size: 14px; white-space: nowrap; }
+.with-btn .btn:disabled, .field input:disabled { opacity: .55; }
+.field[hidden] { display: none; }
 
 /* 확인 창 */
 .modal { position: fixed; inset: 0; z-index: 80; background: rgba(15, 23, 42, .55); display: flex; align-items: flex-end; justify-content: center; }

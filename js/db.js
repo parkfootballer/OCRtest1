@@ -40,6 +40,9 @@ const DB = (() => {
   const authConfig = () => api('GET', '/auth/config');
   // 가입 코드 확인 → { newWorkplace, hotelName, workplaceName }
   const checkCode = (code) => api('POST', '/auth/check-code', { code });
+  // 휴대폰 문자 인증: 인증번호 받기 → { expiresIn }, 확인 → { verificationToken } (가입 때 phoneToken으로 제출)
+  const sendPhoneCode = (phone) => api('POST', '/auth/phone/send', { phone });
+  const verifyPhoneCode = (phone, code) => api('POST', '/auth/phone/verify', { phone, code });
 
   // imageUrl에는 촬영한 dataURL이 들어온다 → 서버가 파일로 저장하고 URL을 돌려준다
   // fileHash: 원본 파일 SHA-256 (중복 확인용), duplicateOf: 중복 경고를 보고도 등록할 때의 원본 문서
@@ -119,7 +122,7 @@ const DB = (() => {
     api('GET', `/training/export?documentType=${encodeURIComponent(documentType)}&limit=${limit}&offset=${offset}`);
 
   return {
-    currentUser, login, signup, logout, authConfig, checkCode, createDocument, saveExtraction, documentBundle,
+    currentUser, login, signup, logout, authConfig, checkCode, sendPhoneCode, verifyPhoneCode, createDocument, saveExtraction, documentBundle,
     listDocuments, setStatus, logReview, deleteDocument, exportAll, memory,
     checkFileDuplicates, documentDuplicates, setDuplicate, saveOcrResult,
     workplace, updateWorkplace, issueCode, revokeCode, inventory, inventoryItem, trainingStats, trainingExport,
