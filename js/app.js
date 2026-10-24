@@ -1047,21 +1047,17 @@
 
   // ---------- 내 정보 ----------
   const fmtCode = (c) => `${c.slice(0, 4)}-${c.slice(4)}`;
+  // 삭제한 코드는 목록에 오지 않는다. 남은 코드 중 기한·횟수가 다 된 것만 따로 표시
   function codeState(c) {
-    if (!c.active) return ['중지됨', 'off'];
     if (c.expiresAt && new Date(c.expiresAt) < new Date()) return ['만료', 'off'];
     if (c.maxUses != null && c.useCount >= c.maxUses) return ['사용 완료', 'off'];
     return ['사용 가능', 'on'];
   }
-  const FIELD_NAMES = { documentType: '문서 종류', lineItems: '품목' };
 
   async function renderMe() {
     const st = installState();
     const isAdmin = user.role === 'admin';
-    const [wp, stats] = await Promise.all([
-      DB.workplace(),
-      isAdmin ? DB.trainingStats().catch(() => null) : null,
-    ]);
+    const wp = await DB.workplace();
     h(`
       <header class="top"><a href="#/" class="back">‹</a><h1>내 정보</h1></header>
       <div class="review">
@@ -1090,7 +1086,7 @@
         ${isAdmin ? `
         <section class="card">
           <div class="card-h"><h2>가입 코드</h2></div>
-          <p class="muted">새 구성원은 이 코드와 호텔명·업장명을 입력해 가입합니다.</p>
+          <p class="muted">새 구성원은 이 코드와 호텔명을 입력해 가입합니다.</p>
           <form id="codeForm" class="code-form">
             <select name="expiresInDays"><option value="7">7일 유효</option><option value="30" selected>30일 유효</option><option value="">기한 없음</option></select>
             <select name="maxUses"><option value="1">1회용</option><option value="10" selected>10명까지</option><option value="">제한 없음</option></select>
@@ -1101,29 +1097,10 @@
             return `<li class="${cls}">
               <code>${fmtCode(c.code)}</code>
               <span><em>${label}</em><small>${c.useCount}${c.maxUses != null ? `/${c.maxUses}` : ''}명 가입${c.expiresAt ? ` · ${new Date(c.expiresAt).toLocaleDateString('ko-KR')}까지` : ''}</small></span>
-              ${cls === 'on' ? `<button class="ghost sm" data-copy="${c.code}">복사</button><button class="ghost sm" data-revoke="${c.id}">중지</button>` : ''}
+              ${cls === 'on' ? `<button class="ghost sm" data-copy="${c.code}">복사</button>` : ''}
+              <button class="ghost sm danger-text" data-delete="${c.id}" data-code="${c.code}">삭제</button>
             </li>`;
           }).join('') || '<li class="muted">발급한 코드가 없습니다.</li>'}</ul>
-        </section>
-
-        <section class="card">
-          <div class="card-h"><h2>OCR 학습 데이터</h2></div>
-          <p class="muted">사람이 검수 완료한 문서마다 원본 이미지·최초 OCR 결과·확정값을 묶어 저장합니다.
-            <b>저장만으로 인식 모델이 학습되지는 않습니다.</b> 내보낸 파일을 tools/training으로 학습셋으로 바꿔 별도로 학습해야 합니다.</p>
-          ${stats && stats.byType.length ? `
-          <table class="tstats"><thead><tr><th>문서 종류</th><th>문서</th><th>수정한 항목</th></tr></thead><tbody>
-            ${stats.byType.map((t) => `<tr><td>${typeLabel(t.documentType)}</td><td>${t.samples}</td><td>${t.corrections}</td></tr>`).join('')}
-          </tbody></table>
-          <details class="members"><summary>항목별 오인식률</summary>
-            <table class="tstats"><thead><tr><th>종류</th><th>항목</th><th>수정/전체</th></tr></thead><tbody>
-              ${stats.byField.map((f) => `<tr><td>${typeLabel(f.documentType)}</td><td>${esc(FIELD_NAMES[f.fieldName] || fieldLabel(f.fieldName))}</td>
-                <td>${f.corrected}/${f.total} (${Math.round((f.corrected / f.total) * 100)}%)</td></tr>`).join('')}
-            </tbody></table>
-          </details>
-          <div class="code-form">
-            <select id="trainType"><option value="">전체 종류</option>${stats.byType.map((t) => `<option value="${t.documentType}">${typeLabel(t.documentType)}</option>`).join('')}</select>
-            <button class="btn ghost" id="trainExport">학습 데이터 내보내기</button>
-          </div>` : '<p class="muted">아직 검수 완료한 문서가 없습니다.</p>'}
         </section>` : ''}
         <section class="card">
           <div class="card-h"><h2>홈 화면에 설치</h2></div>
@@ -1161,7 +1138,7 @@
       download(await DB.exportAll(), `chalkak-${new Date().toISOString().slice(0, 10)}.json`);
     });
 
-    // ---- 관리자: 업장 정보·가입 코드·학습 데이터 ----
+    // ---- 관리자: 업장 정보·가입 코드 ----
     document.getElementById('wpForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       user = await DB.updateWorkplace(Object.fromEntries(new FormData(e.target)));
@@ -1179,33 +1156,17 @@
       const text = `${user.workplace.hotelName} · ${user.workplace.name} 가입 코드: ${fmtCode(b.dataset.copy)}`;
       try { await navigator.clipboard.writeText(text); toast('복사했습니다'); } catch { prompt('코드를 복사하세요', text); }
     }));
-    $view.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
+    $view.querySelectorAll('[data-delete]').forEach((b) => b.addEventListener('click', async () => {
       const ok = await dialog({
-        title: '가입 코드를 중지할까요?', body: '<p>중지한 코드로는 더 이상 가입할 수 없습니다. 이미 가입한 구성원은 그대로입니다.</p>',
-        actions: [{ label: '취소', value: false }, { label: '중지', value: true, cls: 'danger-fill' }],
+        title: '가입 코드를 삭제할까요?',
+        body: `<p><b>${fmtCode(b.dataset.code)}</b> 코드로는 더 이상 가입할 수 없고 목록에서도 사라집니다. 이미 가입한 구성원은 그대로입니다.</p>`,
+        actions: [{ label: '취소', value: false }, { label: '삭제', value: true, cls: 'danger-fill' }],
       });
       if (!ok) return;
-      await DB.revokeCode(b.dataset.revoke);
+      await DB.deleteCode(b.dataset.delete);
+      toast('가입 코드를 삭제했습니다');
       renderMe();
     }));
-    // 이미지가 들어 있어 커질 수 있으므로 50건씩 나눠 파일로 받는다
-    document.getElementById('trainExport')?.addEventListener('click', async (e) => {
-      const btn = e.target;
-      const documentType = document.getElementById('trainType').value;
-      btn.disabled = true;
-      try {
-        for (let offset = 0, part = 1; ; offset += 50, part++) {
-          btn.textContent = `내보내는 중… (${part})`;
-          const page = await DB.trainingExport({ documentType, limit: 50, offset });
-          if (!page.samples.length) break;
-          download(page, `chalkak-training-${documentType || 'all'}-${new Date().toISOString().slice(0, 10)}-${String(part).padStart(3, '0')}.json`);
-          if (offset + page.samples.length >= page.total) break;
-        }
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '학습 데이터 내보내기';
-      }
-    });
     document.getElementById('logoutBtn').addEventListener('click', async () => {
       await DB.logout();
       user = null;

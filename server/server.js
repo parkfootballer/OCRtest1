@@ -442,7 +442,7 @@ app.get('/api/workplace', wrap(async (req, res) => {
   )).rows.map((r) => ({ id: r.id, name: r.name, email: r.email, role: r.role, createdAt: r.created_at }));
   const codes = req.user.role === 'admin' ? (await pool.query(
     `SELECT sc.*, u.name AS created_by_name FROM signup_codes sc LEFT JOIN users u ON u.id = sc.created_by
-      WHERE sc.workplace_id = $1 ORDER BY sc.created_at DESC LIMIT 50`, [wpId(req)],
+      WHERE sc.workplace_id = $1 AND sc.active ORDER BY sc.created_at DESC LIMIT 50`, [wpId(req)],
   )).rows.map(toCode) : [];
   res.json({ workplace: req.user.workplace, role: req.user.role, members, codes });
 }));
@@ -465,10 +465,11 @@ app.post('/api/workplace/codes', requireAdmin, wrap(async (req, res) => {
   res.status(201).json(toCode(r));
 }));
 
+// 가입 코드 삭제: 행을 지우므로 그 코드로는 더 이상 가입할 수 없고 목록에서도 사라진다 (이미 가입한 구성원은 그대로)
 app.delete('/api/workplace/codes/:id', requireAdmin, wrap(async (req, res) => {
   if (!isUuid(req.params.id)) throw new HttpError(404, '가입 코드가 없습니다');
   const { rowCount } = await pool.query(
-    'UPDATE signup_codes SET active = false WHERE id = $1 AND workplace_id = $2', [req.params.id, wpId(req)],
+    'DELETE FROM signup_codes WHERE id = $1 AND workplace_id = $2', [req.params.id, wpId(req)],
   );
   if (!rowCount) throw new HttpError(404, '가입 코드가 없습니다');
   res.status(204).end();

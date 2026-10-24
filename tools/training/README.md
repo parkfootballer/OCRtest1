@@ -19,7 +19,8 @@
 앱의 인식 엔진은 PaddleOCR 모델을 **ONNX로 변환한 추론 전용 파일**(`models/*.onnx`)을 휴대폰 브라우저에서 실행합니다.
 브라우저·Node 서버에는 학습 기능이 없고, ONNX 파일은 그대로 미세조정할 수 없습니다. 실제 학습은 아래처럼 별도로 해야 합니다.
 
-1. 앱 **내 정보 → OCR 학습 데이터 → 학습 데이터 내보내기** (관리자) → `chalkak-training-*.json`
+1. 업장 관리자 계정으로 로그인한 브라우저에서 `/api/training/export?limit=200&offset=0` 을 열어 저장 → `chalkak-training-*.json`
+   (앱 화면에는 메뉴가 없습니다. 200건이 넘으면 `offset`을 200, 400…으로 바꿔 나눠 받고, `documentType=invoice`처럼 종류를 고를 수 있습니다)
 2. 이 폴더에서 학습셋으로 변환
    ```bash
    cd tools/training

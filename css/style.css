@@ -304,9 +304,7 @@ button, input, select { font: inherit; color: inherit; }
 .codes em { font-style: normal; font-weight: 600; color: var(--ok); }
 .codes li.off em { color: var(--muted); }
 .codes small { color: var(--muted); }
-.tstats { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
-.tstats th, .tstats td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); }
-.tstats th { color: var(--muted); font-weight: 500; }
+.ghost.sm.danger-text { color: var(--err); }
 
 /* 카메라: 문서 윤곽·안내·줌 */
 .camera .viewport { position: absolute; inset: 0; overflow: hidden; }

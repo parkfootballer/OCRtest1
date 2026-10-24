@@ -110,21 +110,16 @@ const DB = (() => {
     return me;
   }
   const issueCode = (opts) => api('POST', '/workplace/codes', opts);
-  const revokeCode = (id) => api('DELETE', `/workplace/codes/${id}`);
+  const deleteCode = (id) => api('DELETE', `/workplace/codes/${id}`);
 
   // ---- 재고 ----
   const inventory = () => api('GET', '/inventory');
   const inventoryItem = (id) => api('GET', `/inventory/${id}`);
 
-  // ---- 학습 데이터 (관리자) ----
-  const trainingStats = () => api('GET', '/training/stats');
-  const trainingExport = ({ documentType = '', limit = 50, offset = 0 } = {}) =>
-    api('GET', `/training/export?documentType=${encodeURIComponent(documentType)}&limit=${limit}&offset=${offset}`);
-
   return {
     currentUser, login, signup, logout, authConfig, checkCode, sendPhoneCode, verifyPhoneCode, createDocument, saveExtraction, documentBundle,
     listDocuments, setStatus, logReview, deleteDocument, exportAll, memory,
     checkFileDuplicates, documentDuplicates, setDuplicate, saveOcrResult,
-    workplace, updateWorkplace, issueCode, revokeCode, inventory, inventoryItem, trainingStats, trainingExport,
+    workplace, updateWorkplace, issueCode, deleteCode, inventory, inventoryItem,
   };
 })();
