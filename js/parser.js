@@ -238,15 +238,19 @@ const Parser = (() => {
         if (!isNum(toks[k]) || !isNum(toks[k + 1]) || !isNum(toks[k + 2])) continue;
         const q = toNumber(toks[k]), u = toNumber(toks[k + 1]), a = toNumber(toks[k + 2]);
         if (!q || !u || !a || q > 100000 || Math.abs(q * u - a) > 1) continue;
-        const left = toks.slice(0, k).filter((t) => !isNum(t) || /[^\d,.]/.test(t));
+        const isText = (t) => !isNum(t) || /[^\d,.]/.test(t);
+        const left = toks.slice(0, k).filter(isText);
         if (!left.length) break;
         let name = left[0];
+        // 품목명이 읽힌 글자 상자 (검수에서 고친 품목명을 학습 데이터로 쓸 때 필요)
+        const nameIdx = toks.findIndex((t, i) => i < k && isText(t));
+        const nameBox = l.words && l.words[nameIdx] ? boxOf(l.words[nameIdx]) : null;
         let unit = null;
         if (left.length > 1 && compact(left[left.length - 1]).length <= 3) unit = compact(left.pop());
         const spec = left.slice(1).join(' ') || null;
         name = name.replace(/^\s*\d+[.)]\s+/, '').trim();
         if (!/[\p{L}]/u.test(name)) break;
-        items.push({ itemName: name, spec, unit, quantity: q, unitPrice: u, amount: a });
+        items.push({ itemName: name, spec, unit, quantity: q, unitPrice: u, amount: a, box: nameBox });
         break;
       }
     }
@@ -464,7 +468,7 @@ const Parser = (() => {
         else if (cusHdr && found.length > 1) isSupplier = x !== nearest(cusHdr);
         else if (supHdr && found.length > 1) isSupplier = x === nearest(supHdr);
         else isSupplier = words.some((o) => Math.abs(o.cy - x.w.cy) < x.w.h && BIZ_ONE.test(o.text));
-        if (isSupplier && !d.vendorName) set(d, 'vendorName', { value: cleanName(x.v.value), conf: x.v.conf });
+        if (isSupplier && !d.vendorName) set(d, 'vendorName', { value: cleanName(x.v.value), conf: x.v.conf, box: x.v.box });
         else if (!isSupplier && !d.customerName) set(d, 'customerName', x.v);
       }
       if (!d.vendorName && found.length === 1 && !d.customerName) set(d, 'vendorName', found[0].v);
@@ -474,7 +478,7 @@ const Parser = (() => {
       if (!d.customerName) set(d, 'customerName', findField(words, [/공급받는자상[호초](명)?[:：]?/, /^공급받는자[:：]/], textPick(true), inline));
       if (!d.vendorName) {
         const w = words.find((x) => /\(주\)|㈜|주식회사/.test(x.text) && !LABEL.sangho.test(x.c) && !/공급받는자/.test(x.c));
-        if (w) set(d, 'vendorName', { value: cleanName(w.text.replace(/^.*?(상\s*호|공\s*급\s*자)\s*[:：]?\s*/, '')), conf: w.conf * 0.6 });
+        if (w) set(d, 'vendorName', { value: cleanName(w.text.replace(/^.*?(상\s*호|공\s*급\s*자)\s*[:：]?\s*/, '')), conf: w.conf * 0.6, box: boxOf(w) });
       }
     } else {
       set(d, 'vendorName', findField(words, LABEL.billIssuer, textPick(false), { maxRight: 12 }) || guessBillVendor(words, pageH));
@@ -531,7 +535,8 @@ const Parser = (() => {
     for (const [key, list] of [['vendorName', memory.vendors], ['customerName', memory.customers]]) {
       if (!list || !list.length) continue;
       const hit = d[key] ? snap(d[key], list, fc[key]) : findKnown(lines, list);
-      if (hit) set(d, key, { value: hit.value, conf: Math.max(fc[key] || 0, hit.sim) });
+      // 이름만 바로잡고 위치는 원래 읽힌 상자를 그대로 둔다
+      if (hit) set(d, key, { value: hit.value, conf: Math.max(fc[key] || 0, hit.sim), box: fieldBoxes[key] });
     }
 
     const lineItems = bill ? extractBillItems(words) : extractItems(lines);
@@ -555,7 +560,7 @@ const Parser = (() => {
         taxAmount: d.taxAmount ?? null,
         rawText, confidenceScore, fieldConfidence: fc, ocrConfidence: ocrConf,
       },
-      lineItems: lineItems.map(({ itemName, unit, quantity, unitPrice, amount }) => ({ itemName, unit: unit || null, quantity, unitPrice, amount })),
+      lineItems: lineItems.map(({ itemName, unit, quantity, unitPrice, amount, box }) => ({ itemName, unit: unit || null, quantity, unitPrice, amount, box: box || null })),
       fieldBoxes,
     };
   }

@@ -1,7 +1,9 @@
 // OCR 학습 데이터: 사람이 검수 완료한 문서의 [이미지, 최초 OCR 결과, 확정값]을 묶어 둔다.
 // 저장만 할 뿐 모델이 자동으로 학습되지는 않는다 — 내보낸 뒤 tools/training 으로 PaddleOCR 학습셋을 만든다.
 
-const FIELD_KEYS = ['vendorName', 'businessNumber', 'documentNumber', 'issueDate', 'dueDate', 'totalAmount', 'taxAmount', 'customerName', 'billingMonth'];
+const { similarity } = require('./duplicates');
+
+const FIELD_KEYS =['vendorName', 'businessNumber', 'documentNumber', 'issueDate', 'dueDate', 'totalAmount', 'taxAmount', 'customerName', 'billingMonth'];
 const COLUMN = {
   vendorName: 'vendor_name', businessNumber: 'business_number', documentNumber: 'document_number', issueDate: 'issue_date',
   dueDate: 'due_date', totalAmount: 'total_amount', taxAmount: 'tax_amount', customerName: 'customer_name', billingMonth: 'billing_month',
@@ -29,6 +31,20 @@ async function upsertTrainingSample(c, doc, userId) {
   const rows = FIELD_KEYS
     .filter((k) => str(ocrData[k]) || str(finalFields[k]))
     .map((k) => ({ field: k, ocr: str(ocrData[k]), final: str(finalFields[k]), conf: conf[k] ?? null, box: boxes[k] || null }));
+  // 품목명도 한 줄씩: 최초 OCR 품목과 확정 품목을 이름이 가장 비슷한 것끼리 짝지어(순서가 바뀌거나 지워져도) 위치와 함께 남긴다
+  const ocrRaw = ocr?.parsed?.lineItems || [];
+  const used = new Set();
+  finalItems.forEach((fi, n) => {
+    let best = -1, bs = 0.5; // 절반 이상 비슷해야 같은 품목으로 본다
+    ocrRaw.forEach((oi, i) => {
+      if (used.has(i)) return;
+      const s = similarity(String(oi.itemName || '').replace(/\s/g, ''), String(fi.itemName || '').replace(/\s/g, ''));
+      if (s >= bs) { bs = s; best = i; }
+    });
+    if (best < 0) return; // 검수 때 새로 추가한 품목 — OCR 원본이 없음
+    used.add(best);
+    rows.push({ field: `lineItems[${n}].itemName`, ocr: str(ocrRaw[best].itemName), final: str(fi.itemName), conf: null, box: ocrRaw[best].box || null });
+  });
   rows.push({ field: 'documentType', ocr: str(ocr?.parsed?.documentType), final: doc.document_type, conf: null, box: null });
   rows.push({ field: 'lineItems', ocr: JSON.stringify(ocrItems), final: JSON.stringify(finalItems), conf: null, box: null });
   const corrected = rows.filter((r) => r.ocr !== r.final).length;

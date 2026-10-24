@@ -106,4 +106,4 @@ async function findDuplicates(c, workplaceId, target) {
   return out.sort((a, b) => (a.level === b.level ? 0 : a.level === 'exact' ? -1 : 1)).slice(0, 5);
 }
 
-module.exports = { findDuplicates, compare, normName };
+module.exports = { findDuplicates, compare, normName, similarity };

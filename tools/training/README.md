@@ -8,7 +8,7 @@
 | 최초 OCR 결과 | 글자 상자 좌표·글자·신뢰도, 회전 각도, 모델 버전 (`ocr_results.result`) |
 | 최초 추출값 | OCR 직후 규칙으로 뽑은 필드·품목, 필드별 값 위치 상자 (`ocr_results.parsed`) |
 | 확정값 | 검수로 확정한 필드·품목·문서 종류 (`training_samples.final_*`) |
-| 항목별 비교 | 필드마다 최초값·확정값·수정 여부·신뢰도·상자 (`training_fields`) |
+| 항목별 비교 | 필드마다 최초값·확정값·수정 여부·신뢰도·상자 (`training_fields`). 품목명은 `lineItems[n].itemName`으로 한 줄씩 |
 
 - 자동 확정(사람이 보지 않은 문서)은 넣지 않습니다. 자동 확정 문서도 사람이 열어 저장하면 들어갑니다.
 - 업장 단위로만 조회·내보내기됩니다. 내보내기는 **업장 관리자**만 할 수 있습니다.
@@ -29,8 +29,10 @@
    ```
 3. (권장) `dataset/Label.txt`를 [PPOCRLabel](https://github.com/PFCCLab/PPOCRLabel)로 열어 상자·글자를 사람이 한 번 더 확인
 4. Python + PaddlePaddle(GPU 권장) 환경에서 PaddleOCR 저장소의 **korean PP-OCRv5 mobile rec** 학습 설정으로
-   **Paddle 원본 사전학습 가중치**에서 미세조정 (`rec_train.txt` / `rec_val.txt`, 사전은 `models/dict_korean.txt`와 같아야 함)
-5. 학습한 모델을 inference 모델로 내보낸 뒤 `paddle2onnx`로 ONNX 변환 → `models/rec_korean.onnx` 교체
+   **Paddle 원본 사전학습 가중치**에서 미세조정 (`rec_train.txt` / `rec_val.txt`, 사전은 `models/dict_korean.txt`와 같아야 함).
+   우리 데이터만으로 학습하면 다른 글자를 잊어버릴 수 있으므로 원래 학습 데이터(또는 공개 한국어 데이터)와 섞어 학습하세요
+5. 학습한 모델을 inference 모델로 내보낸 뒤 `paddle2onnx`로 ONNX 변환 → `models/rec_korean.onnx` 교체.
+   앱은 입력을 `[N, 3, 48, 가변 너비]`로 넣으므로 너비가 고정되지 않게 내보내야 합니다
 6. `tools/eval`로 기존 평가셋과 `dataset/eval`에서 정확도가 실제로 올랐는지 확인
 7. `models/README.md`의 SHA-256, `js/ocr.js`의 `MODEL_VERSION`, `sw.js`의 `OCR_CACHE`를 올려 배포
 
@@ -40,7 +42,7 @@
 |---|---|
 | `images/` | 원본 이미지 |
 | `Label.txt` | PPOCRLabel 형식. OCR이 찾은 상자 + 글자 (검수로 고친 칸은 고친 값, 자동 변환이 불확실한 칸은 `###`) |
-| `rec/`, `rec_train.txt`, `rec_val.txt` | 인식(rec) 모델 미세조정용 잘라낸 줄 + 정답. 문서 단위로 train/val 분리 (`--val 0.1`) |
+| `rec/`, `rec_train.txt`, `rec_val.txt` | 인식(rec) 모델 미세조정용 잘라낸 줄 + 정답. 문서 단위로 train/val 분리 (`--val 0.1`).<br>모델 사전(`models/dict_korean.txt`)에 없는 글자가 든 정답과 `--max-len`(기본 25, 학습 설정 `Global.max_text_length`와 맞출 것)보다 긴 정답은 뺍니다 — PaddleOCR이 이런 정답을 조용히 잘라 내거나 건너뛰기 때문 |
 | `kie.jsonl` | 문서별 최초 추출값·확정값. 추출 규칙(`js/parser.js`) 개선·KIE 모델 평가용 |
 | `eval/` | `tools/eval` 라벨 형식. `node ../eval/eval.js --data dataset/eval` |
 
@@ -51,6 +53,7 @@
   필드가 아닌 일반 글자(주소, 안내문 등)는 정답이 없어 rec 학습에 넣지 않습니다.
 - 한 상자에 라벨과 값이 함께 있으면("합계금액:506,000원") 값 부분만 바꿉니다. 날짜는 표기가 제각각이라 자동 변환하지 않습니다(`###`).
 - **글자 위치(det) 정답은 없습니다.** `Label.txt`의 상자는 모델이 찾은 것이라, det 모델을 학습하려면 PPOCRLabel로 사람이 고쳐야 합니다.
-- 품목 표는 줄 단위 정답 위치가 없어 rec 학습에는 쓰지 않고 `kie.jsonl`·`eval/`의 정답으로만 씁니다.
+- 거래명세서 품목명은 위치가 함께 저장되어 rec 학습에 들어갑니다. 고지서 부과 항목과 품목의 수량·단가·금액 칸은 위치를 저장하지 않아 `kie.jsonl`·`eval/` 정답으로만 씁니다.
+- 자동 확정(신뢰도가 높아 사람이 보지 않은) 문서는 들어가지 않으므로, 쌓이는 속도는 "사람이 검수한 문서 수"에 비례합니다.
 - 수백 건 이상이 모여야 미세조정 효과를 기대할 수 있습니다. 적은 데이터로 학습하면 오히려 나빠질 수 있으니 반드시 `tools/eval`로 비교하세요.
 - 검수에서 고친 필드값은 지금도 **거래처 기억**(`/api/memory`)으로 다음 인식의 상호·고객명 보정에 바로 쓰입니다. 이것은 모델 학습이 아니라 규칙 보정입니다.

@@ -19,6 +19,13 @@ const inputs = args.flatMap((a, i) => (a === '--in' ? [args[i + 1]] : []));
 const OUT = opt('out');
 const MIN_CONF = Number(opt('min-conf', 95)); // 고치지 않은 칸은 OCR 신뢰도가 이 이상일 때만 정답으로 쓴다
 const VAL_RATIO = Number(opt('val', 0.1));
+// PaddleOCR rec 학습은 사전에 없는 글자를 조용히 빼 버리고, max_text_length(기본 25)보다 긴 정답은 건너뛴다.
+// 그런 정답이 섞이면 잘못 학습되므로 여기서 미리 걸러 낸다
+const MAX_LEN = Number(opt('max-len', 25));
+const DICT = new Set(fs.readFileSync(path.join(__dirname, '..', '..', 'models', 'dict_korean.txt'), 'utf8')
+  .replace(/\r/g, '').split('\n').filter(Boolean));
+DICT.add(' '); // PP-OCR rec 설정의 use_space_char: true
+const badChars = (s) => [...new Set([...s].filter((ch) => !DICT.has(ch)))];
 if (!inputs.length || !OUT) {
   console.error('사용법: node build-dataset.js --in <내보낸.json> [--in ...] --out <폴더>');
   process.exit(1);
@@ -53,7 +60,8 @@ function correctedText(word, field) {
   fs.mkdirSync(path.join(OUT, 'eval', 'labels'), { recursive: true });
   fs.mkdirSync(path.join(OUT, 'eval', 'images'), { recursive: true });
   const label = [], recTrain = [], recVal = [], kie = [];
-  const stat = { samples: 0, skipped: 0, recCorrected: 0, recConfirmed: 0, recSkipped: 0 };
+  const stat = { samples: 0, skipped: 0, recCorrected: 0, recConfirmed: 0, recSkipped: 0, recBadChar: 0, recTooLong: 0 };
+  const unknownChars = new Set();
 
   for (const file of inputs) {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -88,6 +96,9 @@ function correctedText(word, field) {
       // 인식 모델용 잘라낸 줄: 사람이 확인한 칸(고친 칸 + 고치지 않은 고신뢰 칸)만
       for (const [i, w] of words.entries()) {
         if (w.source !== 'corrected' && w.source !== 'confirmed') { if (w.source === 'unsure') stat.recSkipped++; continue; }
+        const bad = badChars(w.label);
+        if (bad.length) { stat.recBadChar++; bad.forEach((ch) => unknownChars.add(ch)); continue; }
+        if ([...w.label].length > MAX_LEN) { stat.recTooLong++; continue; }
         const pad = Math.round((w.box[3] - w.box[1]) * 0.1);
         const left = Math.max(0, w.box[0] - pad), top = Math.max(0, w.box[1] - pad);
         const width = Math.min(meta.width - left, w.box[2] - w.box[0] + pad * 2);
@@ -125,4 +136,6 @@ function correctedText(word, field) {
   console.log(`문서 ${stat.samples}건 (건너뜀 ${stat.skipped}) → ${OUT}`);
   console.log(`인식용 줄: 고친 값 ${stat.recCorrected} · 확인된 값 ${stat.recConfirmed} · 자동 변환 못한 고친 칸 ${stat.recSkipped}`);
   console.log(`train ${recTrain.length} / val ${recVal.length}`);
+  if (stat.recBadChar) console.log(`사전에 없는 글자가 있어 뺀 줄 ${stat.recBadChar}개: ${[...unknownChars].join(' ')}`);
+  if (stat.recTooLong) console.log(`${MAX_LEN}자를 넘어 뺀 줄 ${stat.recTooLong}개 (학습 설정 Global.max_text_length를 늘리고 --max-len 으로 맞추면 포함)`);
 })().catch((e) => { console.error(e.message); process.exit(1); });
