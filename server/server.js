@@ -770,7 +770,7 @@ app.use('/api', (req, res) => res.status(404).json({ error: '없는 API입니다
 
 // 정적 파일: 앱 셸만 공개. 서비스 워커와 index.html은 항상 새로 확인하게 한다
 const PUBLIC = new Set(['index.html', 'manifest.webmanifest', 'sw.js']);
-const PUBLIC_DIRS = ['css', 'js', 'icons', 'models'];
+const PUBLIC_DIRS = ['css', 'js', 'icons', 'models', 'samples'];
 app.use((req, res, next) => {
   const p = decodeURIComponent(req.path).replace(/^\/+/, '') || 'index.html';
   if (!PUBLIC.has(p) && !PUBLIC_DIRS.some((d) => p.startsWith(d + '/'))) return res.status(404).end();

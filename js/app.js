@@ -202,7 +202,7 @@
         <div class="cam-top" id="camTop">
           <a href="#/" class="icon-btn" aria-label="닫기">✕</a>
           <span class="cam-title">${retakeId ? '재촬영' : '문서 촬영'}</span>
-          <button class="icon-btn" id="sampleBtn" title="샘플 문서로 시험">샘플</button>
+          <button class="icon-btn" id="sampleBtn" title="문서 예시 보기">샘플</button>
         </div>
         <div class="cam-hint" id="camHint">문서의 네 모서리를 안내 틀 안에 맞춰 주세요</div>
         <div class="cam-bottom" id="camBottom">
@@ -221,10 +221,18 @@
           </div>
         </div>
         <div class="sample-sheet" id="sampleSheet" hidden>
-          <p>카메라 없이 시험할 샘플 문서</p>
+          <p>이런 문서를 촬영할 수 있어요</p>
           <button data-sample="invoice">거래명세서 샘플</button>
           <button data-sample="giro">지로 고지서 샘플</button>
           <button class="ghost" data-sample="">취소</button>
+        </div>
+        <div class="sample-view" id="sampleView" hidden>
+          <div class="sample-view-top">
+            <span id="sampleTitle"></span>
+            <button class="icon-btn" id="sampleClose" aria-label="닫기">✕</button>
+          </div>
+          <div class="sample-view-img"><img id="sampleImg" alt=""></div>
+          <p class="sample-view-hint">예시 이미지입니다. 저장되거나 인식되지 않습니다. 두 번 탭하면 확대됩니다</p>
         </div>
       </div>
     `);
@@ -347,16 +355,12 @@
     }));
 
     // 촬영·선택한 사진 → 영역 조정(기울기 보정·잘라내기) → 중복 확인 → 등록
-    const go = async (dataUrl, { hashSource, skipEditor = false } = {}) => {
+    const go = async (dataUrl, { hashSource } = {}) => {
       paused = true;
       try {
-        let finalUrl = dataUrl;
-        if (!skipEditor) {
-          const r = await Scanner.editor(dataUrl);
-          if (!r) return; // 다시 찍기
-          finalUrl = r.dataUrl;
-        }
-        await capture(finalUrl, docType, retakeId, await sha256Hex(hashSource ?? dataUrl).catch(() => null));
+        const r = await Scanner.editor(dataUrl);
+        if (!r) return; // 다시 찍기
+        await capture(r.dataUrl, docType, retakeId, await sha256Hex(hashSource ?? dataUrl).catch(() => null));
       } finally {
         paused = false;
         cam.classList.remove('flash');
@@ -385,10 +389,29 @@
 
     const sheet = document.getElementById('sampleSheet');
     document.getElementById('sampleBtn').addEventListener('click', () => { sheet.hidden = false; });
+    // 샘플: 촬영할 수 있는 문서의 예시 이미지만 보여 준다 (등록·인식하지 않음)
+    const SAMPLES = {
+      invoice: ['거래명세서 샘플', '/samples/invoice.jpg'],
+      giro: ['지로 고지서 샘플', '/samples/giro.webp'],
+    };
+    const view = document.getElementById('sampleView');
+    const viewImg = document.getElementById('sampleImg');
     sheet.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       sheet.hidden = true;
-      if (b.dataset.sample) go(Samples[b.dataset.sample](), { skipEditor: true });
+      const s = SAMPLES[b.dataset.sample];
+      if (!s) return;
+      document.getElementById('sampleTitle').textContent = s[0];
+      viewImg.src = s[1];
+      viewImg.alt = s[0];
+      view.classList.remove('zoomed');
+      view.hidden = false;
+      paused = true; // 보는 동안 문서 감지 멈춤
     }));
+    viewImg.addEventListener('dblclick', () => view.classList.toggle('zoomed'));
+    document.getElementById('sampleClose').addEventListener('click', () => {
+      view.hidden = true;
+      paused = false;
+    });
   }
 
   function stopCamera() {
