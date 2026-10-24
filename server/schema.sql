@@ -261,3 +261,51 @@ CREATE TABLE IF NOT EXISTS phone_verifications (
 );
 CREATE INDEX IF NOT EXISTS phone_verifications_phone_idx ON phone_verifications (phone, created_at DESC);
 CREATE INDEX IF NOT EXISTS phone_verifications_ip_idx ON phone_verifications (ip, created_at DESC);
+
+-- ================================================================
+-- 개인정보: 동의 기록 · 학습 데이터 활용 동의 · 접속기록 · 탈퇴
+-- ================================================================
+-- 회원 동의 기록 (어떤 버전의 고지에 언제·어디서 동의했는지). 탈퇴하면 함께 지운다
+CREATE TABLE IF NOT EXISTS user_consents (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  consent_type  text NOT NULL,                      -- privacy (필수: 개인정보 수집·이용)
+  version       text NOT NULL,                      -- 고지문 버전 (js/policy.js의 버전과 같음)
+  agreed        boolean NOT NULL,
+  ip            text,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS user_consents_user_idx ON user_consents (user_id, consent_type, created_at DESC);
+
+-- 업장(소유주) 단위 OCR 학습 데이터 활용 동의 (선택). 동의한 업장의 문서만 학습 데이터로 저장한다
+ALTER TABLE workplaces ADD COLUMN IF NOT EXISTS training_consent_at timestamptz;
+ALTER TABLE workplaces ADD COLUMN IF NOT EXISTS training_consent_by uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE workplaces ADD COLUMN IF NOT EXISTS training_consent_version text;
+-- 동의 전에 쌓인 학습 데이터는 지우지 않되, 내보내기에서는 동의 시각 이후 검수분만 나간다 (server/training.js)
+
+-- 접속기록: 누가·언제·어디서·무엇을 했는지 (개인정보의 안전성 확보조치 기준). 2년 보관 후 자동 삭제
+-- 기록이 계정 삭제와 함께 사라지지 않도록 회원과 외래키로 묶지 않는다
+CREATE TABLE IF NOT EXISTS access_logs (
+  id            bigserial PRIMARY KEY,
+  at            timestamptz NOT NULL DEFAULT now(),
+  user_id       uuid,
+  workplace_id  uuid,
+  action        text NOT NULL,                      -- auth.login, document.view, document.delete, data.export …
+  target_id     text,                               -- 대상 문서·코드 등의 id
+  result        text NOT NULL,                      -- success | fail
+  status        int,
+  ip            text,
+  user_agent    text,
+  detail        jsonb
+);
+CREATE INDEX IF NOT EXISTS access_logs_workplace_idx ON access_logs (workplace_id, at DESC);
+CREATE INDEX IF NOT EXISTS access_logs_at_idx ON access_logs (at);
+
+-- 회원이 탈퇴해도 업장 문서는 업장 자료이므로 남긴다 (올린 사람만 비움)
+ALTER TABLE documents ALTER COLUMN user_id DROP NOT NULL;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_user_id_fkey' AND confdeltype = 'c') THEN
+    ALTER TABLE documents DROP CONSTRAINT documents_user_id_fkey;
+    ALTER TABLE documents ADD CONSTRAINT documents_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
+  END IF;
+END $$;

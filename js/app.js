@@ -951,6 +951,12 @@
           <label class="field"><span class="lbl">이메일</span><input name="email" type="email" autocomplete="email" inputmode="email" required></label>
           <label class="field"><span class="lbl">비밀번호${mode === 'signup' ? ' (8자 이상)' : ''}</span>
             <input name="password" type="password" minlength="${mode === 'signup' ? 8 : 1}" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}" required></label>
+          ${mode === 'signup' ? `
+          <div class="consent">
+            <label class="check"><input type="checkbox" name="agreePrivacy"> <span><b>[필수]</b> 개인정보 수집·이용, 처리 위탁 및 국외 이전에 동의합니다</span></label>
+            <details><summary>내용 보기</summary>${Policy.privacyConsent}</details>
+            <a href="#/privacy" class="policy-link">개인정보 처리방침</a>
+          </div>` : '<a href="#/privacy" class="policy-link">개인정보 처리방침</a>'}
           <p class="form-err" id="authErr" hidden></p>
           <button class="btn primary" type="submit" id="authSubmit">${mode === 'signup' ? '가입하고 시작하기' : '로그인'}</button>
         </form>
@@ -1052,12 +1058,18 @@
         err.hidden = false;
         return;
       }
+      if (mode === 'signup' && !f.agreePrivacy) {
+        err.textContent = '개인정보 수집·이용에 동의해야 가입할 수 있습니다';
+        err.hidden = false;
+        return;
+      }
       btn.disabled = true;
       err.hidden = true;
       try {
         user = mode === 'signup'
-          ? await DB.signup({ email: f.email, password: f.password, name: f.name, code: f.code, hotelName: f.hotelName, phone: verifiedPhone, phoneToken })
+          ? await DB.signup({ email: f.email, password: f.password, name: f.name, code: f.code, hotelName: f.hotelName, phone: verifiedPhone, phoneToken, consents: { privacy: Policy.PRIVACY_VERSION } })
           : await DB.login(f.email, f.password);
+        if (user.privacyConsentRequired) return (location.hash = '#/consent');
         await refreshBadge();
         location.hash = '#/';
       } catch (ex) {
@@ -1094,7 +1106,8 @@
           <p class="wp-name"><b>${esc(user.workplace.hotelName)}</b> · ${esc(user.workplace.name)}</p>
           <p class="muted">같은 업장 구성원끼리만 문서·재고를 함께 봅니다. 다른 업장의 데이터는 보이지 않습니다.</p>
           <details class="members"><summary>구성원 ${wp.members.length}명</summary>
-            <ul>${wp.members.map((m) => `<li>${esc(m.name)} <small>${esc(m.email)}${m.role === 'admin' ? ' · 관리자' : ''}</small></li>`).join('')}</ul>
+            <ul>${wp.members.map((m) => `<li class="member"><span>${esc(m.name)} <small>${esc(m.email)}${m.role === 'admin' ? ' · 관리자' : ''}</small></span>
+              ${isAdmin && m.id !== user.id ? `<button class="ghost sm" data-role="${m.role === 'admin' ? 'member' : 'admin'}" data-member="${m.id}">${m.role === 'admin' ? '관리자 해제' : '관리자 지정'}</button>` : ''}</li>`).join('')}</ul>
           </details>
           ${isAdmin ? `
           <details class="members"><summary>업장 정보 수정</summary>
@@ -1124,6 +1137,26 @@
               <button class="ghost sm danger-text" data-delete="${c.id}" data-code="${c.code}">삭제</button>
             </li>`;
           }).join('') || '<li class="muted">발급한 코드가 없습니다.</li>'}</ul>
+        </section>
+
+        <section class="card">
+          <div class="card-h"><h2>OCR 개선 데이터 활용</h2><span class="badge ${wp.trainingConsent ? 'st-ok' : 'st-proc'}">${wp.trainingConsent ? '동의함' : '동의 안 함'}</span></div>
+          ${wp.trainingConsent
+            ? `<p class="muted">${new Date(wp.trainingConsent.agreedAt).toLocaleDateString('ko-KR')} ${esc(wp.trainingConsent.byName || '')} 동의.
+                검수 완료한 문서를 인식 정확도 개선에 활용합니다.${wp.trainingConsent.current ? '' : ' <b>동의 문구가 바뀌었습니다. 다시 확인해 주세요.</b>'}</p>
+              <details><summary>동의 내용</summary>${Policy.trainingConsent}</details>
+              ${wp.trainingConsent.current ? '' : '<button class="btn primary block" id="trainAgree">바뀐 내용 확인 후 다시 동의</button>'}
+              <button class="btn ghost block" id="trainWithdraw">동의 철회 (모은 데이터 즉시 파기)</button>`
+            : `<p class="muted">선택 사항입니다. 동의하면 검수 완료한 문서의 이미지·인식 결과·확정값을 인식 정확도 개선에 씁니다. 동의하지 않아도 모든 기능을 쓸 수 있습니다.</p>
+              <details><summary>동의 내용</summary>${Policy.trainingConsent}</details>
+              <label class="check"><input type="checkbox" id="trainOwner"> <span>업장 소유주이거나 소유주로부터 동의 권한을 받았습니다</span></label>
+              <button class="btn primary block" id="trainAgree">동의</button>`}
+        </section>
+
+        <section class="card">
+          <div class="card-h"><h2>접속기록</h2></div>
+          <p class="muted">로그인, 문서 열람·수정·삭제, 내보내기 등 개인정보 처리 내역을 2년간 보관합니다. 정기적으로 점검해 주세요.</p>
+          <details id="logsBox"><summary>최근 기록 보기</summary><ul class="logs-list" id="logsList"><li class="muted">불러오는 중…</li></ul></details>
         </section>` : ''}
         <section class="card">
           <div class="card-h"><h2>홈 화면에 설치</h2></div>
@@ -1140,9 +1173,75 @@
           <div class="card-h"><h2>데이터</h2></div>
           <button class="btn ghost block" id="exportBtn">전체 데이터 내보내기 (JSON)</button>
         </section>
+        <section class="card account-links">
+          <a href="#/privacy">개인정보 처리방침 ›</a>
+          <button class="btn text danger" id="withdrawBtn">회원 탈퇴</button>
+        </section>
         <button class="btn text danger" id="logoutBtn">로그아웃</button>
       </div>
     `);
+    // ---- 관리자: 권한·학습 데이터 동의·접속기록 ----
+    $view.querySelectorAll('[data-member]').forEach((b) => b.addEventListener('click', async () => {
+      await DB.setMemberRole(b.dataset.member, b.dataset.role);
+      toast(b.dataset.role === 'admin' ? '관리자로 지정했습니다' : '관리자를 해제했습니다');
+      renderMe();
+    }));
+    document.getElementById('trainAgree')?.addEventListener('click', async () => {
+      const owner = document.getElementById('trainOwner');
+      if (owner && !owner.checked) return toast('소유주 동의 권한을 확인해 주세요');
+      await DB.setTrainingConsent(true, Policy.TRAINING_VERSION);
+      toast('OCR 개선 데이터 활용에 동의했습니다');
+      renderMe();
+    });
+    document.getElementById('trainWithdraw')?.addEventListener('click', async () => {
+      const ok = await dialog({
+        title: '동의를 철회할까요?',
+        body: '<p>이 업장에서 지금까지 모은 학습 데이터(최초 인식 결과·검수 묶음)를 <b>즉시 파기</b>하고, 앞으로는 모으지 않습니다. 문서·재고 등 다른 데이터는 그대로입니다.</p>',
+        actions: [{ label: '취소', value: false }, { label: '철회하고 파기', value: true, cls: 'danger-fill' }],
+      });
+      if (!ok) return;
+      const r = await DB.setTrainingConsent(false);
+      toast(`동의를 철회했습니다 · 학습 데이터 ${r.deletedSamples}건 파기`);
+      renderMe();
+    });
+    const ACTION_LABELS = {
+      'auth.signup': '가입', 'auth.login': '로그인', 'auth.logout': '로그아웃', 'consent.privacy': '개인정보 동의',
+      'account.delete': '회원 탈퇴', 'workplace.view': '업장 정보 열람', 'workplace.update': '업장 정보 수정',
+      'consent.training': '학습 데이터 동의 변경', 'member.role': '권한 변경', 'code.issue': '가입 코드 발급',
+      'code.delete': '가입 코드 삭제', 'access_log.view': '접속기록 열람', 'document.create': '문서 등록',
+      'document.view': '문서 열람', 'document.update': '문서 상태 변경', 'document.save': '문서 내용 저장',
+      'document.delete': '문서 삭제', 'inventory.view': '재고 열람', 'data.export': '전체 데이터 내보내기',
+      'training.export': '학습 데이터 내보내기',
+    };
+    document.getElementById('logsBox')?.addEventListener('toggle', async (e) => {
+      if (!e.target.open || e.target.dataset.loaded) return;
+      e.target.dataset.loaded = '1';
+      const logs = await DB.accessLogs();
+      document.getElementById('logsList').innerHTML = logs.map((l) => `
+        <li class="${l.result}"><span><b>${esc(ACTION_LABELS[l.action] || l.action)}</b> ${esc(l.userName || '(탈퇴·미확인)')}</span>
+          <small>${dateLabel(l.at)} · ${esc(l.ip || '')}${l.result === 'fail' ? ` · 실패(${l.status})` : ''}</small></li>`).join('')
+        || '<li class="muted">기록이 없습니다.</li>';
+    });
+    // ---- 회원 탈퇴 ----
+    document.getElementById('withdrawBtn').addEventListener('click', async () => {
+      const p = dialog({
+        title: '회원 탈퇴',
+        body: `<p>계정·로그인 정보·동의 기록이 즉시 삭제되고 되돌릴 수 없습니다. 업장 문서는 업장 자료로 남으며 올린 사람 표시만 지워집니다. 접속기록은 법정 보관 기간(2년) 동안 남습니다.</p>
+          <label class="field"><span class="lbl">비밀번호 확인</span><input type="password" id="withdrawPw" autocomplete="current-password"></label>`,
+        actions: [{ label: '취소', value: false }, { label: '탈퇴', value: true, cls: 'danger-fill' }],
+      });
+      const pw = document.getElementById('withdrawPw');
+      pw.focus();
+      if (!(await p)) return;
+      try {
+        await DB.deleteAccount(pw.value);
+        user = null;
+        toast('탈퇴했습니다');
+        location.hash = '#/login';
+      } catch (ex) {
+        toast(ex.message);
+      }
+    });
     document.getElementById('installBtn')?.addEventListener('click', async () => {
       installPrompt.prompt();
       await installPrompt.userChoice;
@@ -1197,21 +1296,71 @@
     });
   }
 
+  // ---------- 개인정보 처리방침 / 동의 ----------
+  function renderPrivacy() {
+    h(`
+      <header class="top"><a href="${user ? '#/me' : '#/login'}" class="back">‹</a><h1>개인정보 처리방침</h1></header>
+      <div class="review policy">${Policy.policyPage}</div>
+    `);
+  }
+
+  // 기존 회원 또는 고지문이 바뀐 경우: 동의해야 계속 쓸 수 있다
+  function renderConsent() {
+    h(`
+      <div class="auth consent-page">
+        <img class="auth-logo" src="/icons/icon-192.png" alt="">
+        <h1>개인정보 처리 동의</h1>
+        <p class="muted">계속 이용하려면 아래 내용을 확인하고 동의해 주세요</p>
+        <div class="auth-form">
+          <div class="consent">
+            <label class="check"><input type="checkbox" id="agreeBox"> <span><b>[필수]</b> 개인정보 수집·이용, 처리 위탁 및 국외 이전에 동의합니다</span></label>
+            <details open><summary>내용 보기</summary>${Policy.privacyConsent}</details>
+            <a href="#/privacy" class="policy-link">개인정보 처리방침</a>
+          </div>
+          <p class="form-err" id="consentErr" hidden></p>
+          <button class="btn primary" id="agreeBtn">동의하고 계속하기</button>
+          <button class="btn text" id="consentLogout">동의하지 않고 로그아웃</button>
+        </div>
+      </div>
+    `);
+    document.getElementById('agreeBtn').addEventListener('click', async () => {
+      const err = document.getElementById('consentErr');
+      if (!document.getElementById('agreeBox').checked) {
+        err.textContent = '동의 항목을 체크해 주세요';
+        err.hidden = false;
+        return;
+      }
+      user = await DB.agreePrivacy(Policy.PRIVACY_VERSION);
+      await refreshBadge();
+      location.hash = '#/';
+    });
+    document.getElementById('consentLogout').addEventListener('click', async () => {
+      await DB.logout();
+      user = null;
+      location.hash = '#/login';
+    });
+  }
+
   // ---------- 라우터 ----------
   async function route() {
     const [path, qs] = (location.hash.slice(1) || '/').split('?');
     const params = new URLSearchParams(qs || '');
     const parts = path.split('/').filter(Boolean);
-    if (!user && parts[0] !== 'login') return (location.hash = '#/login');
+    if (!user && !['login', 'privacy'].includes(parts[0])) return (location.hash = '#/login');
     if (user && parts[0] === 'login') return (location.hash = '#/');
+    // 최신 개인정보 고지에 동의하지 않은 회원(기존 회원·문구 변경)은 동의 화면부터
+    if (user?.privacyConsentRequired && !['consent', 'privacy'].includes(parts[0])) return (location.hash = '#/consent');
+    if (user && !user.privacyConsentRequired && parts[0] === 'consent') return (location.hash = '#/');
     if (parts[0] !== 'camera') stopCamera();
-    const fullscreen = ['camera', 'process', 'login'].includes(parts[0]);
+    const fullscreen = ['camera', 'process', 'login', 'consent'].includes(parts[0]) || (parts[0] === 'privacy' && !user);
     $tabbar.hidden = fullscreen;
     document.body.classList.toggle('fullscreen', fullscreen);
     $tabbar.querySelectorAll('[data-tab]').forEach((a) => a.classList.toggle('on', a.dataset.tab === (parts[0] || 'home')));
 
     switch (parts[0]) {
       case 'login': return renderLogin(params);
+      case 'privacy': return renderPrivacy();
+      case 'consent': return renderConsent();
       case 'me': return renderMe();
       case 'camera': return renderCamera(params);
       case 'process': return renderProcess(parts[1]);
@@ -1243,7 +1392,7 @@
       }
       user = null;
     }
-    if (user) {
+    if (user && !user.privacyConsentRequired) { // 동의 전에는 문서 API를 쓸 수 없다
       // 인식 도중 앱이 닫힌 지 10분 넘은 문서는 재촬영 대상으로 돌린다
       const stale = Date.now() - 10 * 60_000;
       for (const { doc } of await DB.listDocuments()) {

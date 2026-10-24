@@ -38,6 +38,16 @@ const DB = (() => {
     await api('POST', '/auth/logout');
   }
   const authConfig = () => api('GET', '/auth/config');
+  // 개인정보 수집·이용 동의 (기존 회원·고지문 변경 시)
+  async function agreePrivacy(version) {
+    me = await api('POST', '/consents', { privacy: version });
+    return me;
+  }
+  // 회원 탈퇴 (비밀번호 확인)
+  async function deleteAccount(password) {
+    await api('DELETE', '/me', { password });
+    me = null;
+  }
   // 가입 코드 확인 → { newWorkplace, hotelName, workplaceName }
   const checkCode = (code) => api('POST', '/auth/check-code', { code });
   // 휴대폰 문자 인증: 인증번호 받기 → { expiresIn }, 확인 → { verificationToken } (가입 때 phoneToken으로 제출)
@@ -111,6 +121,10 @@ const DB = (() => {
   }
   const issueCode = (opts) => api('POST', '/workplace/codes', opts);
   const deleteCode = (id) => api('DELETE', `/workplace/codes/${id}`);
+  // OCR 학습 데이터 활용 동의(선택): agree=false면 철회 + 모은 학습 데이터 파기
+  const setTrainingConsent = (agree, version) => api('PUT', '/workplace/training-consent', { agree, version });
+  const setMemberRole = (id, role) => api('PATCH', `/workplace/members/${id}`, { role });
+  const accessLogs = () => api('GET', '/workplace/access-logs');
 
   // ---- 재고 ----
   const inventory = () => api('GET', '/inventory');
@@ -121,5 +135,6 @@ const DB = (() => {
     listDocuments, setStatus, logReview, deleteDocument, exportAll, memory,
     checkFileDuplicates, documentDuplicates, setDuplicate, saveOcrResult,
     workplace, updateWorkplace, issueCode, deleteCode, inventory, inventoryItem,
+    agreePrivacy, deleteAccount, setTrainingConsent, setMemberRole, accessLogs,
   };
 })();

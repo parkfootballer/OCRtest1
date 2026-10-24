@@ -88,7 +88,9 @@ async function trainingStats(c, workplaceId) {
 // 내보내기: 이미지(base64)·최초 OCR·확정값을 한 파일로. 업장 범위 밖의 데이터는 조회 조건에서 걸러진다
 async function exportSamples(c, workplaceId, { documentType, limit = 50, offset = 0 }) {
   const params = [workplaceId];
-  let where = 's.workplace_id = $1';
+  // 업장이 학습 활용에 동의한 뒤 검수한 문서만 내보낸다 (동의 전·철회 후 데이터는 나가지 않음)
+  let where = `s.workplace_id = $1 AND EXISTS (SELECT 1 FROM workplaces w WHERE w.id = s.workplace_id
+                 AND w.training_consent_at IS NOT NULL AND s.verified_at >= w.training_consent_at)`;
   if (documentType) { params.push(documentType); where += ` AND s.document_type = $${params.length}`; }
   const total = (await c.query(`SELECT count(*)::int AS n FROM training_samples s WHERE ${where}`, params)).rows[0].n;
   params.push(limit, offset);
