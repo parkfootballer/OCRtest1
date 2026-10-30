@@ -391,7 +391,8 @@ app.post('/api/auth/phone/send', wrap(async (req, res) => {
   } catch (e) {
     console.error('문자 발송 실패:', e.message);
     await pool.query('DELETE FROM phone_verifications WHERE id = $1', [row.id]);
-    throw new HttpError(502, '문자를 보내지 못했습니다. 번호를 확인하고 다시 시도하세요');
+    // 원인(키 오류·발신번호 미등록·잔액 부족 등)은 위 로그에 남는다
+    throw new HttpError(502, '문자를 보내지 못했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 문의하세요');
   }
   // 개발용(console) 발송일 때만 화면에서 시험할 수 있도록 번호를 돌려준다
   res.json({ expiresIn: CODE_TTL_SEC, ...(sms.isConsole() && process.env.NODE_ENV !== 'production' ? { devCode: code } : {}) });
@@ -958,8 +959,13 @@ app.use(express.static(ROOT, {
 }));
 
 app.use((err, req, res, next) => {
-  if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
   if (err.type === 'entity.too.large') return res.status(413).json({ error: '이미지가 너무 큽니다' });
+  // 우리가 일부러 던진 오류(HttpError)는 5xx라도 안내 문구를 그대로 보여 준다 (예: 문자 발송 미설정 503, 발송 실패 502)
+  if (err instanceof HttpError) {
+    if (err.status >= 500) console.error(`${req.method} ${req.path} → ${err.status} ${err.message}`);
+    return res.status(err.status).json({ error: err.message });
+  }
+  if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message }); // express 자체 오류(잘못된 JSON 등)
   console.error(err);
   res.status(500).json({ error: '서버 오류' });
 });
