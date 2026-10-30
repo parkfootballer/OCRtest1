@@ -377,6 +377,13 @@ DO $$ BEGIN
   ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'pending'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- 업장 개설 승인: 새 업장코드로 만든 업장은 운영자가 확인하기 전까지 pending (업장코드 선점 방지)
+-- 이미 있던 업장은 active
+ALTER TABLE workplaces ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';
+DO $$ BEGIN
+  ALTER TABLE workplaces ADD CONSTRAINT workplaces_status_check CHECK (status IN ('active', 'pending'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- 회원이 탈퇴해도 업장 문서는 업장 자료이므로 남긴다 (올린 사람만 비움)
 ALTER TABLE documents ALTER COLUMN user_id DROP NOT NULL;
 DO $$ BEGIN

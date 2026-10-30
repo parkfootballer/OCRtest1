@@ -132,6 +132,10 @@ const DB = (() => {
   // 가입 승인 / 거절(승인 대기 회원 삭제)
   const approveMember = (id) => api('PATCH', `/workplace/members/${id}`, { status: 'active' });
   const rejectMember = (id) => api('DELETE', `/workplace/members/${id}`);
+  // ---- 운영자: 새 업장 개설 승인 ----
+  const pendingWorkplaces = () => api('GET', '/operator/workplaces');
+  const approveWorkplace = (id) => api('POST', `/operator/workplaces/${id}/approve`);
+  const rejectWorkplace = (id) => api('DELETE', `/operator/workplaces/${id}`);
   const accessLogs = () => api('GET', '/workplace/access-logs');
 
   // ---- 재고 ----
@@ -144,5 +148,6 @@ const DB = (() => {
     checkFileDuplicates, documentDuplicates, setDuplicate, saveOcrResult,
     workplace, updateWorkplace, issueCode, deleteCode, inventory, inventoryItem,
     agreePrivacy, deleteAccount, setTrainingConsent, setMemberRole, approveMember, rejectMember, accessLogs,
+    pendingWorkplaces, approveWorkplace, rejectWorkplace,
   };
 })();

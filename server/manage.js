@@ -2,6 +2,7 @@
 //   node --env-file=.env manage.js workplaces                       업장 목록
 //   node --env-file=.env manage.js create-workplace <업장코드> <업장명>  업장을 미리 만든다 (이 코드로 가입하면 승인 대기로 합류)
 //   node --env-file=.env manage.js issue-code <업장 id> [유효일수] [최대 사용 횟수]
+//   node --env-file=.env manage.js workplace-approve <업장코드>     개설 대기 업장 승인 (운영자 화면 대신)
 //   node --env-file=.env manage.js make-admin <이메일>               같은 업장의 관리자로 지정
 //   node --env-file=.env manage.js db-user-add <이름> [--read-only]  팀원 DB 계정 발급 (조회·수정, 또는 조회만)
 //   node --env-file=.env manage.js db-user-remove <이름>             팀원 DB 계정 삭제
@@ -121,7 +122,7 @@ async function issue(workplaceId, days, uses) {
   switch (cmd) {
     case 'workplaces': {
       const { rows } = await pool.query(
-        `SELECT w.id, w.code, w.hotel_name, w.name, count(u.id)::int AS members FROM workplaces w
+        `SELECT w.id, w.code, w.status, w.hotel_name, w.name, count(u.id)::int AS members FROM workplaces w
            LEFT JOIN users u ON u.workplace_id = w.id GROUP BY w.id ORDER BY w.hotel_name, w.name`,
       );
       console.table(rows);
@@ -140,6 +141,14 @@ async function issue(workplaceId, days, uses) {
       if (!id) throw new Error('사용법: issue-code <업장 id> [유효일수] [최대 사용 횟수]');
       const code = await issue(id, Number(days) || null, Number(uses) || null);
       console.log(`가입 코드: ${fmtCode(code.code)}`);
+      break;
+    }
+    case 'workplace-approve': {
+      // 개설 대기 업장 승인 (앱의 운영자 화면과 같은 동작)
+      const { rows: [w] } = await pool.query(`UPDATE workplaces SET status = 'active' WHERE code_key = upper(regexp_replace($1, '\\s', '', 'g')) RETURNING id, code, name`, [args[0] || '']);
+      if (!w) throw new Error('해당 업장코드가 없습니다');
+      await pool.query(`UPDATE users SET status = 'active' WHERE workplace_id = $1 AND role = 'admin'`, [w.id]);
+      console.log(`업장 개설 승인: ${w.code} · ${w.name}`);
       break;
     }
     case 'make-admin': {
@@ -230,7 +239,7 @@ async function issue(workplaceId, days, uses) {
       break;
     }
     default:
-      console.log('명령: workplaces | create-workplace | issue-code | make-admin | db-user-add | db-user-remove | db-users | '
+      console.log('명령: workplaces | create-workplace | workplace-approve | issue-code | make-admin | db-user-add | db-user-remove | db-users | '
         + 'api-client-add | api-client-scope | api-client-map | api-client-unmap | api-client-rotate | api-client-revoke | api-clients');
   }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => pool.end());

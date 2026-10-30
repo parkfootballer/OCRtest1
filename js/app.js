@@ -1035,7 +1035,7 @@
           const r = await DB.checkWorkplace(raw);
           msg.textContent = r.exists
             ? '이미 등록된 업장코드입니다. 가입하면 그 업장 관리자가 승인한 뒤 이용할 수 있습니다'
-            : '새 업장코드입니다. 가입하면 이 업장이 만들어지고 관리자가 됩니다';
+            : '새 업장코드입니다. 가입하면 이 업장의 관리자가 되며, 운영자가 개설을 확인한 뒤 이용할 수 있습니다';
           msg.className = `code-msg ${r.exists ? '' : 'ok'}`;
         } catch (e) {
           msg.textContent = e.message;
@@ -1087,6 +1087,7 @@
     const wp = await DB.workplace();
     const active = wp.members.filter((m) => m.status !== 'pending');
     const pending = wp.members.filter((m) => m.status === 'pending');
+    const newWorkplaces = user.isOperator ? await DB.pendingWorkplaces().catch(() => []) : [];
     h(`
       <header class="top"><a href="#/" class="back">‹</a><h1>내 정보</h1></header>
       <div class="review">
@@ -1125,6 +1126,18 @@
             || '<li class="muted">승인을 기다리는 사람이 없습니다.</li>'}</ul>
         </section>
 
+        ${user.isOperator ? `
+        <section class="card">
+          <div class="card-h"><h2>업장 개설 승인 (운영자)</h2>${newWorkplaces.length ? `<span class="badge st-review">대기 ${newWorkplaces.length}곳</span>` : ''}</div>
+          <p class="muted">새 업장코드로 가입하면 여기서 확인해야 열립니다. 실제 지점 담당자가 맞는지(연락처 등) 확인한 뒤 승인하세요.</p>
+          <ul class="pending-list">${newWorkplaces.map((w) => `
+            <li><span><b>${esc(w.code)} · ${esc(w.name)}</b>
+              <small>${dateLabel(w.createdAt)} 신청 · ${w.members.map((m) => `${esc(m.email)}${m.phone ? ` ${esc(fmtPhone(m.phone))}` : ''}${m.role === 'admin' ? '(개설자)' : ''}`).join(', ')}</small></span>
+              <button class="ghost sm" data-wp-approve="${w.id}">승인</button>
+              <button class="ghost sm danger-text" data-wp-reject="${w.id}" data-code="${esc(w.code)}">거절</button></li>`).join('')
+            || '<li class="muted">개설 대기 중인 업장이 없습니다.</li>'}</ul>
+        </section>` : ''}
+
         <section class="card">
           <div class="card-h"><h2>OCR 개선 데이터 활용</h2><span class="badge ${wp.trainingConsent ? 'st-ok' : 'st-proc'}">${wp.trainingConsent ? '동의함' : '동의 안 함'}</span></div>
           ${wp.trainingConsent
@@ -1155,10 +1168,11 @@
                 <p class="muted">아이폰은 Safari에서만 설치할 수 있습니다.</p>`
             : '<p class="muted">이 브라우저는 앱 설치를 지원하지 않습니다. 휴대폰의 Chrome(안드로이드) 또는 Safari(아이폰)에서 열어 주세요.</p>'}
         </section>
+        ${isAdmin ? `
         <section class="card">
           <div class="card-h"><h2>데이터</h2></div>
           <button class="btn ghost block" id="exportBtn">전체 데이터 내보내기 (JSON)</button>
-        </section>
+        </section>` : ''}
         <section class="card account-links">
           <a href="#/privacy">개인정보 처리방침 ›</a>
           <button class="btn text danger" id="withdrawBtn">회원 탈퇴</button>
@@ -1243,9 +1257,27 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
     };
-    document.getElementById('exportBtn').addEventListener('click', async () => {
+    document.getElementById('exportBtn')?.addEventListener('click', async () => {
       download(await DB.exportAll(), `chalkak-${new Date().toISOString().slice(0, 10)}.json`);
     });
+
+    // ---- 운영자: 업장 개설 승인·거절 ----
+    $view.querySelectorAll('[data-wp-approve]').forEach((b) => b.addEventListener('click', async () => {
+      await DB.approveWorkplace(b.dataset.wpApprove);
+      toast('업장 개설을 승인했습니다');
+      renderMe();
+    }));
+    $view.querySelectorAll('[data-wp-reject]').forEach((b) => b.addEventListener('click', async () => {
+      const ok = await dialog({
+        title: '업장 개설을 거절할까요?',
+        body: `<p><b>${esc(b.dataset.code)}</b> 업장과 그 업장으로 가입한 계정이 삭제됩니다.</p>`,
+        actions: [{ label: '취소', value: false }, { label: '거절', value: true, cls: 'danger-fill' }],
+      });
+      if (!ok) return;
+      await DB.rejectWorkplace(b.dataset.wpReject);
+      toast('업장 개설을 거절했습니다');
+      renderMe();
+    }));
 
     // ---- 관리자: 업장코드·업장명 수정, 가입 승인·거절 ----
     document.getElementById('wpForm')?.addEventListener('submit', async (e) => {
@@ -1332,7 +1364,9 @@
       <div class="auth">
         <img class="auth-logo" src="/icons/icon-192.png" alt="">
         <h1>승인을 기다리고 있습니다</h1>
-        <p class="muted">업장 <b>${esc(user.workplace.code || user.workplace.hotelName)}</b>의 관리자가 가입을 승인하면 문서함과 재고를 이용할 수 있습니다.</p>
+        <p class="muted">${user.workplace.status === 'pending'
+          ? `새 업장 <b>${esc(user.workplace.code || '')}</b>의 개설을 서비스 운영자가 확인하고 있습니다. 확인되면 바로 이용할 수 있습니다.`
+          : `업장 <b>${esc(user.workplace.code || user.workplace.hotelName)}</b>의 관리자가 가입을 승인하면 문서함과 재고를 이용할 수 있습니다.`}</p>
         <div class="auth-form">
           <button class="btn primary" id="pendingCheck">승인됐는지 다시 확인</button>
           <button class="btn text" id="pendingLogout">로그아웃</button>
@@ -1420,8 +1454,10 @@
     } catch (e) {
       if (e.status !== 401) {
         $tabbar.hidden = true;
-        return h(`<div class="empty"><div class="empty-ico">⚠️</div><p>서버에 연결할 수 없습니다.<br>${esc(e.message)}</p>
-          <button class="btn primary" onclick="location.reload()">다시 시도</button></div>`);
+        h(`<div class="empty"><div class="empty-ico">⚠️</div><p>서버에 연결할 수 없습니다.<br>${esc(e.message)}</p>
+          <button class="btn primary" id="retryBtn">다시 시도</button></div>`);
+        document.getElementById('retryBtn').addEventListener('click', () => location.reload()); // CSP: 인라인 onclick 금지
+        return;
       }
       user = null;
     }

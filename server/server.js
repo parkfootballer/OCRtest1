@@ -26,6 +26,10 @@ const SESSION_DAYS = 30;
 // 고지문 버전: js/policy.js의 PRIVACY_VERSION·TRAINING_VERSION과 같아야 한다. 문구를 바꾸면 둘 다 올린다 (기존 회원은 다시 동의)
 const PRIVACY_VERSION = 'privacy-2026-10-24';
 const TRAINING_VERSION = 'training-2026-10-24';
+// 서비스 운영자 이메일(쉼표로 여러 개). 새 업장 개설을 승인·거절한다 — 업장코드 선점으로 실제 지점 데이터를 가로채는 것을 막는다
+const OPERATOR_EMAILS = String(process.env.OPERATOR_EMAILS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+// 인증 문자 하루 발송 한도 (서비스 전체). 넘으면 발송을 멈춰 문자 요금 소진 공격을 막는다
+const SMS_DAILY_LIMIT = Math.max(1, Number(process.env.SMS_DAILY_LIMIT) || 300);
 // 보관 기간 (일) — 처리방침에 적은 기간과 같아야 한다
 const RETENTION = { phoneVerificationDays: 30, accessLogDays: 730 };
 const pool = new Pool({
@@ -41,8 +45,9 @@ const DOC_TYPES = ['auto', 'giro', 'bill', 'invoice', 'tax_invoice'];
 const toUser = (r) => r && {
   id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at, phone: r.phone || null,
   privacyConsentRequired: r.privacy_version !== PRIVACY_VERSION, // 최신 고지에 동의하지 않은 회원(기존 회원 포함)
-  status: r.status, // active | pending(관리자 승인 대기)
-  workplace: { id: r.workplace_id, code: r.workplace_code, hotelName: r.hotel_name, name: r.workplace_name },
+  status: r.status, // active | pending(관리자 승인 대기 또는 업장 개설 대기)
+  isOperator: OPERATOR_EMAILS.includes(String(r.email).toLowerCase()), // 업장 개설을 승인하는 서비스 운영자
+  workplace: { id: r.workplace_id, code: r.workplace_code, hotelName: r.hotel_name, name: r.workplace_name, status: r.workplace_status },
 };
 const toDoc = (r) => r && {
   id: r.id, userId: r.user_id, documentType: r.document_type, imageUrl: r.image_url, status: r.status,
@@ -129,7 +134,7 @@ async function startSession(req, res, userId) {
   setSessionCookie(req, res, token, SESSION_DAYS * 86400);
 }
 
-const USER_SQL = `SELECT u.*, w.hotel_name, w.name AS workplace_name, w.code AS workplace_code,
+const USER_SQL = `SELECT u.*, w.hotel_name, w.name AS workplace_name, w.code AS workplace_code, w.status AS workplace_status,
     (SELECT c.version FROM user_consents c WHERE c.user_id = u.id AND c.consent_type = 'privacy' AND c.agreed
       ORDER BY c.created_at DESC LIMIT 1) AS privacy_version
   FROM users u JOIN workplaces w ON w.id = u.workplace_id`;
@@ -186,6 +191,8 @@ const AUDIT_ACTIONS = {
   'POST /api/workplace/codes': 'code.issue',
   'DELETE /api/workplace/codes/:id': 'code.delete',
   'GET /api/workplace/access-logs': 'access_log.view',
+  'POST /api/operator/workplaces/:id/approve': 'operator.workplace.approve',
+  'DELETE /api/operator/workplaces/:id': 'operator.workplace.reject',
   // 문서 목록은 화면마다 불려 기록이 지나치게 많아지므로 제외하고, 상세 열람부터 남긴다
   'POST /api/documents': 'document.create',
   'GET /api/documents/:id': 'document.view',
@@ -228,6 +235,29 @@ function rateLimit(req) {
   if (!a || a.reset < now) return attempts.set(key, { n: 1, reset: now + 15 * 60_000 });
   if (++a.n > 20) throw new HttpError(429, '시도가 너무 많습니다. 잠시 후 다시 시도하세요');
 }
+// 계정 단위 잠금: 같은 이메일로 15분 안에 10번 틀리면 15분 동안 로그인 차단 (여러 IP로 나눠 대입하는 공격 방지)
+const loginFails = new Map();
+const LOCK_FAILS = 10;
+function checkLocked(mail) {
+  const f = loginFails.get(mail);
+  if (f && f.lockedUntil > Date.now()) {
+    const min = Math.ceil((f.lockedUntil - Date.now()) / 60_000);
+    throw new HttpError(429, `로그인 실패가 많아 ${min}분 동안 잠겼습니다. 잠시 후 다시 시도하세요`);
+  }
+}
+function recordLoginFail(mail) {
+  const now = Date.now();
+  let f = loginFails.get(mail);
+  if (!f || f.reset < now) f = { n: 0, reset: now + 15 * 60_000, lockedUntil: 0 };
+  if (++f.n >= LOCK_FAILS) f.lockedUntil = now + 15 * 60_000;
+  loginFails.set(mail, f);
+}
+// 시도 기록이 메모리에 계속 쌓이지 않도록 10분마다 지난 기록 정리
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of attempts) if (v.reset < now) attempts.delete(k);
+  for (const [k, v] of loginFails) if (v.reset < now && v.lockedUntil < now) loginFails.delete(k);
+}, 10 * 60_000).unref();
 
 // ---------- 가입 코드 ----------
 const isMasterCode = (raw) => !!SIGNUP_CODE
@@ -324,15 +354,47 @@ async function bundle(id, workplaceId) {
 const app = express();
 app.set('trust proxy', 1); // Render 등 HTTPS 프록시 뒤에서 req.secure·req.ip가 맞게 나오도록
 app.disable('x-powered-by');
+// 콘텐츠 보안 정책: 스크립트는 우리 서버와 OCR 엔진 CDN에서만, 다른 사이트가 화면을 띄울 수 없게(클릭재킹 방지)
+// - wasm-unsafe-eval: OCR 엔진(WebAssembly) 실행, data:/blob: 연결·이미지: 촬영 사진 처리
+// - style 'unsafe-inline': 화면이 요소별 style 속성을 쓴다 (스크립트와 달리 위험이 낮음)
+const CSP = [
+  "default-src 'self'",
+  // blob: OCR 엔진이 CDN에서 받은 모듈을 blob URL로 불러온다 (페이지 안 코드만 blob을 만들 수 있음)
+  "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval' blob:",
+  "worker-src 'self' blob: https://cdn.jsdelivr.net",
+  "connect-src 'self' https://cdn.jsdelivr.net data: blob:",
+  "img-src 'self' data: blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self'",
+  "media-src 'self' blob:",
+  "manifest-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', CSP);
+  res.setHeader('X-Frame-Options', 'DENY'); // CSP frame-ancestors를 모르는 오래된 브라우저용
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(), payment=()');
+  // HTTPS로 들어온 요청이면 앞으로 1년간 HTTPS로만 접속하게 (HSTS)
+  if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
   // 교차 출처 격리 → 지원 브라우저에서 OCR(WebAssembly)이 여러 코어를 쓸 수 있다
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
   next();
 });
-app.use(express.json({ limit: '20mb' }));
+// 요청 본문 크기: 사진이 들어가는 요청만 크게, 나머지는 작게 (큰 요청을 반복해 서버를 느리게 만드는 것 방지)
+const jsonSmall = express.json({ limit: '1mb' });
+const jsonOcr = express.json({ limit: '5mb' });
+const jsonImage = express.json({ limit: '20mb' });
+app.use((req, res, next) => {
+  if (/^\/api\/documents(\/[0-9a-f-]{36})?$/i.test(req.path) && ['POST', 'PATCH'].includes(req.method)) return jsonImage(req, res, next);
+  if (/^\/api\/documents\/[0-9a-f-]{36}\/ocr-results$/i.test(req.path)) return jsonOcr(req, res, next);
+  return jsonSmall(req, res, next);
+});
 app.use('/api', auditMiddleware);
 
 // 다른 사이트에서 보낸 변경 요청 차단 (쿠키 인증 CSRF 방어)
@@ -401,6 +463,13 @@ app.post('/api/auth/phone/send', wrap(async (req, res) => {
   );
   if (lim.recent) throw new HttpError(429, '잠시 후 다시 요청하세요 (1분에 한 번)');
   if (lim.phone_hour >= 5 || lim.ip_hour >= 20) throw new HttpError(429, '인증번호 요청이 너무 많습니다. 1시간 뒤 다시 시도하세요');
+  // 서비스 전체 하루 한도: 번호·IP를 바꿔 가며 문자 요금을 소진시키는 공격 방지
+  const { rows: [day] } = await pool.query(`SELECT count(*)::int AS n FROM phone_verifications WHERE created_at > now() - interval '24 hours'`);
+  if (day.n >= SMS_DAILY_LIMIT) {
+    console.error(`문자 하루 한도(${SMS_DAILY_LIMIT}건) 도달 — 발송 중지. 비정상적인 가입 시도인지 확인하세요`);
+    throw new HttpError(429, '오늘 인증 문자 발송량이 많아 잠시 중단되었습니다. 내일 다시 시도하거나 관리자에게 문의하세요');
+  }
+  if (day.n === Math.floor(SMS_DAILY_LIMIT * 0.8)) console.warn(`문자 하루 한도의 80% 사용 (${day.n}/${SMS_DAILY_LIMIT})`);
 
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
   const { rows: [row] } = await pool.query(
@@ -476,19 +545,21 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
     if (!pv) throw new HttpError(400, '휴대폰 인증이 만료되었습니다. 다시 인증해 주세요');
     await c.query('UPDATE phone_verifications SET used_at = now() WHERE id = $1', [pv.id]);
 
-    // 업장코드로 업장 찾기: 처음 쓰는 코드면 새 업장(가입자 = 관리자), 이미 있으면 승인 대기로 합류.
+    // 업장코드로 업장 찾기:
+    //  - 처음 쓰는 코드 → 새 업장을 "개설 대기"로 만들고 가입자는 그 업장의 관리자(운영자 승인 전까지 대기)
+    //  - 이미 있는 코드 → 그 업장에 승인 대기로 합류 (업장 관리자가 승인)
+    // 운영자 승인을 거치게 해, 아무나 실제 지점 코드를 먼저 차지해 직원 데이터를 받아 보는 것을 막는다.
     // 동시에 같은 새 코드로 가입해도 업장은 하나만 생기도록 INSERT … ON CONFLICT 로 처리
     let role = 'admin';
-    let status = 'active';
+    let status = 'pending';
     let { rows: [wp] } = await c.query(
-      `INSERT INTO workplaces (hotel_name, name, code) VALUES ($1, $2, $1) ON CONFLICT DO NOTHING RETURNING id`,
+      `INSERT INTO workplaces (hotel_name, name, code, status) VALUES ($1, $2, $1, 'pending') ON CONFLICT DO NOTHING RETURNING id`,
       [code, wpName],
     );
     if (!wp) {
       ({ rows: [wp] } = await c.query('SELECT id FROM workplaces WHERE code_key = $1', [codeKey(code)]));
       if (!wp) throw new HttpError(409, '같은 이름의 업장이 이미 있습니다. 다른 업장코드나 업장명을 입력하세요');
       role = 'member';
-      status = 'pending';
     }
     const workplaceId = wp.id;
     const { rows } = await c.query(
@@ -502,7 +573,7 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
       `INSERT INTO user_consents (user_id, consent_type, version, agreed, ip) VALUES ($1, 'privacy', $2, true, $3)`,
       [rows[0].id, PRIVACY_VERSION, req.ip],
     );
-    res.locals.audit = { userId: rows[0].id, workplaceId, detail: { joined: status === 'pending' ? 'pending' : 'created' } };
+    res.locals.audit = { userId: rows[0].id, workplaceId, detail: { joined: role === 'admin' ? 'created' : 'pending' } };
     return rows[0].id;
   });
   await startSession(req, res, userId);
@@ -512,11 +583,14 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
 app.post('/api/auth/login', wrap(async (req, res) => {
   rateLimit(req);
   const mail = String(req.body?.email || '').trim().toLowerCase();
+  checkLocked(mail);
   const { rows } = await pool.query(`${USER_SQL} WHERE u.email = $1`, [mail]);
   res.locals.audit = rows[0] ? { userId: rows[0].id, workplaceId: rows[0].workplace_id } : { detail: { email: mail.slice(0, 100) } };
   if (!rows[0] || !(await verifyPassword(String(req.body?.password || ''), rows[0].password_hash))) {
+    recordLoginFail(mail); // 없는 이메일도 같이 센다 (있는 계정인지 알아내지 못하게)
     throw new HttpError(401, '이메일 또는 비밀번호가 맞지 않습니다');
   }
+  loginFails.delete(mail);
   await startSession(req, res, rows[0].id);
   res.json(toUser(rows[0]));
 }));
@@ -648,6 +722,45 @@ app.delete('/api/workplace/members/:id', requireAdmin, wrap(async (req, res) => 
     `DELETE FROM users WHERE id = $1 AND workplace_id = $2 AND status = 'pending'`, [req.params.id, wpId(req)],
   );
   if (!rowCount) throw new HttpError(404, '승인 대기 중인 회원이 없습니다');
+  res.status(204).end();
+}));
+
+// ---------- 운영자: 새 업장 개설 승인 ----------
+function requireOperator(req, res, next) {
+  if (!req.user.isOperator) return next(new HttpError(403, '서비스 운영자만 할 수 있습니다'));
+  next();
+}
+app.get('/api/operator/workplaces', requireOperator, wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT w.id, w.code, w.name, w.created_at,
+            json_agg(json_build_object('name', u.name, 'email', u.email, 'phone', u.phone, 'role', u.role) ORDER BY u.created_at)
+              FILTER (WHERE u.id IS NOT NULL) AS members
+       FROM workplaces w LEFT JOIN users u ON u.workplace_id = w.id
+      WHERE w.status = 'pending' GROUP BY w.id ORDER BY w.created_at`,
+  );
+  res.json(rows.map((r) => ({ id: r.id, code: r.code, name: r.name, createdAt: r.created_at, members: r.members || [] })));
+}));
+// 승인: 업장을 열고, 개설한 관리자도 이용 가능하게. 그 뒤 합류 신청자는 그 관리자가 승인한다
+app.post('/api/operator/workplaces/:id/approve', requireOperator, wrap(async (req, res) => {
+  if (!isUuid(req.params.id)) throw new HttpError(404, '업장이 없습니다');
+  await withTx(async (c) => {
+    const { rowCount } = await c.query(`UPDATE workplaces SET status = 'active' WHERE id = $1 AND status = 'pending'`, [req.params.id]);
+    if (!rowCount) throw new HttpError(404, '개설 대기 중인 업장이 없습니다');
+    await c.query(`UPDATE users SET status = 'active' WHERE workplace_id = $1 AND role = 'admin'`, [req.params.id]);
+  });
+  res.locals.audit = { targetId: req.params.id };
+  res.status(204).end();
+}));
+// 거절: 개설 대기 업장과 그 업장으로 가입한 계정을 지운다 (아직 문서가 없는 상태)
+app.delete('/api/operator/workplaces/:id', requireOperator, wrap(async (req, res) => {
+  if (!isUuid(req.params.id)) throw new HttpError(404, '업장이 없습니다');
+  await withTx(async (c) => {
+    const { rows: [w] } = await c.query(`SELECT id FROM workplaces WHERE id = $1 AND status = 'pending' FOR UPDATE`, [req.params.id]);
+    if (!w) throw new HttpError(404, '개설 대기 중인 업장이 없습니다');
+    await c.query('DELETE FROM users WHERE workplace_id = $1', [w.id]);
+    await c.query('DELETE FROM workplaces WHERE id = $1', [w.id]);
+  });
+  res.locals.audit = { targetId: req.params.id };
   res.status(204).end();
 }));
 
@@ -970,7 +1083,7 @@ app.get('/api/training/export', requireAdmin, wrap(async (req, res) => {
 }));
 
 // 전체 데이터 내보내기 (업장 범위)
-app.get('/api/export', wrap(async (req, res) => {
+app.get('/api/export', requireAdmin, wrap(async (req, res) => { // 업장 전체를 한 번에 내려받으므로 관리자만
   const q = (sql) => pool.query(sql, [wpId(req)]).then((r) => r.rows);
   res.json({
     workplace: req.user.workplace,

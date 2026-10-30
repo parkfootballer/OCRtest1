@@ -26,6 +26,12 @@ services:
         sync: false
       - key: SOLAPI_API_SECRET
         sync: false
+      # 새 업장 개설을 승인하는 운영자 이메일 (쉼표로 여러 개). 비어 있으면 manage.js workplace-approve 로 승인
+      - key: OPERATOR_EMAILS
+        sync: false
+      # 인증 문자 하루 발송 한도 (서비스 전체, 기본 300)
+      - key: SMS_DAILY_LIMIT
+        value: "300"
 
 databases:
   - name: chalkak-db
