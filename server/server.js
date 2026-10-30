@@ -386,7 +386,10 @@ const hashCode = (salt, code) => `${salt}:${sha256(`${salt}:${code}`)}`;
 app.post('/api/auth/phone/send', wrap(async (req, res) => {
   const phone = normPhone(req.body?.phone);
   if (!isMobile(phone)) throw new HttpError(400, '휴대폰 번호 형식이 올바르지 않습니다');
-  if (!sms.configured()) throw new HttpError(503, '문자 발송이 설정되지 않았습니다. 관리자에게 문의하세요');
+  if (!sms.configured()) {
+    console.error(`문자 설정 부족: ${sms.missing().join(', ')}`); // 무엇이 빠졌는지는 로그에만
+    throw new HttpError(503, '문자 발송이 설정되지 않았습니다. 관리자에게 문의하세요');
+  }
   if ((await pool.query('SELECT 1 FROM users WHERE phone = $1', [phone])).rows[0]) throw new HttpError(409, '이미 가입된 휴대폰 번호입니다');
   // 발송 제한: 같은 번호 1분에 1회·1시간에 5회, 같은 IP 1시간에 20회
   const { rows: [lim] } = await pool.query(
@@ -1032,7 +1035,10 @@ async function purgeExpired() {
   await pool.query(await fs.readFile(path.join(__dirname, 'schema.sql'), 'utf8'));
   await purgeExpired();
   setInterval(() => purgeExpired().catch((e) => console.error('파기 작업 실패:', e.message)), 6 * 3600_000);
-  app.listen(PORT, () => console.log(`찰칵장부 서버: http://localhost:${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`찰칵장부 서버: http://localhost:${PORT}`);
+    console.log(sms.describe()); // 호스팅에 넣은 문자 설정이 실제로 어떻게 읽혔는지 (비밀값은 길이만)
+  });
 })().catch((e) => {
   console.error('서버 시작 실패:', e.message);
   process.exit(1);
