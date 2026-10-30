@@ -11,6 +11,7 @@ const { syncInventory, documentMovements } = require('./inventory');
 const { upsertTrainingSample, trainingStats, exportSamples } = require('./training');
 const { generateCode, normCode, nameKey } = require('./codes');
 const sms = require('./sms');
+const partnerRouter = require('./partner');
 
 // DATE는 'YYYY-MM-DD' 문자열, BIGINT·NUMERIC은 숫자로 받는다
 types.setTypeParser(1082, (v) => v);
@@ -185,19 +186,21 @@ const AUDIT_ACTIONS = {
   'GET /api/export': 'data.export',
   'GET /api/training/export': 'training.export',
 };
+function writeAccessLog(req, res, action) {
+  const a = res.locals.audit || {}; // 핸들러가 채우는 값: userId(로그인·가입), targetId, detail
+  const user = req.user || null;
+  pool.query(
+    `INSERT INTO access_logs (user_id, workplace_id, action, target_id, result, status, ip, user_agent, detail)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [a.userId || user?.id || null, a.workplaceId || user?.workplace?.id || null, action,
+      a.targetId || req.params?.id || null, res.statusCode < 400 ? 'success' : 'fail', res.statusCode,
+      req.ip, String(req.headers['user-agent'] || '').slice(0, 200), a.detail ? JSON.stringify(a.detail) : null],
+  ).catch((e) => console.error('접속기록 저장 실패:', e.message));
+}
 function auditMiddleware(req, res, next) {
   res.on('finish', () => {
     const action = req.route && AUDIT_ACTIONS[`${req.method} ${req.route.path}`];
-    if (!action) return;
-    const a = res.locals.audit || {}; // 핸들러가 채우는 값: userId(로그인·가입), targetId, detail
-    const user = req.user || null;
-    pool.query(
-      `INSERT INTO access_logs (user_id, workplace_id, action, target_id, result, status, ip, user_agent, detail)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [a.userId || user?.id || null, a.workplaceId || user?.workplace?.id || null, action,
-        a.targetId || req.params?.id || null, res.statusCode < 400 ? 'success' : 'fail', res.statusCode,
-        req.ip, String(req.headers['user-agent'] || '').slice(0, 200), a.detail ? JSON.stringify(a.detail) : null],
-    ).catch((e) => console.error('접속기록 저장 실패:', e.message));
+    if (action) writeAccessLog(req, res, action);
   });
   next();
 }
@@ -333,6 +336,15 @@ app.use('/api', (req, res, next) => {
 app.get('/api/health', wrap(async (req, res) => {
   await pool.query('SELECT 1');
   res.json({ ok: true });
+}));
+
+// 외부 연동 읽기 전용 API (회원 로그인 대신 API 키로 인증) — server/partner.js, docs/partner-api.md
+app.use('/api/ext/v1', partnerRouter({
+  pool,
+  onAudit: (req, res) => {
+    res.locals.audit = { ...res.locals.audit, detail: { client: req.client?.name, query: req.query } };
+    writeAccessLog(req, res, res.locals.audit.action || 'partner.unknown');
+  },
 }));
 
 app.use('/api', wrap(loadUser));
@@ -958,9 +970,10 @@ async function purgeExpired() {
     pool.query('DELETE FROM sessions WHERE expires_at < now()'),
     pool.query(`DELETE FROM phone_verifications WHERE created_at < now() - make_interval(days => $1)`, [RETENTION.phoneVerificationDays]),
     pool.query(`DELETE FROM access_logs WHERE at < now() - make_interval(days => $1)`, [RETENTION.accessLogDays]),
+    pool.query(`DELETE FROM document_deletions WHERE deleted_at < now() - interval '90 days'`), // 연동용 삭제 기록
   ]);
   const n = r.map((x) => x.rowCount);
-  if (n.some(Boolean)) console.log(`보관 기간 지난 데이터 파기: 세션 ${n[0]} · 문자 인증 ${n[1]} · 접속기록 ${n[2]}`);
+  if (n.some(Boolean)) console.log(`보관 기간 지난 데이터 파기: 세션 ${n[0]} · 문자 인증 ${n[1]} · 접속기록 ${n[2]} · 삭제 기록 ${n[3]}`);
 }
 
 (async () => {

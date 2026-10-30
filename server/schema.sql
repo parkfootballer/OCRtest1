@@ -301,6 +301,67 @@ CREATE TABLE IF NOT EXISTS access_logs (
 CREATE INDEX IF NOT EXISTS access_logs_workplace_idx ON access_logs (workplace_id, at DESC);
 CREATE INDEX IF NOT EXISTS access_logs_at_idx ON access_logs (at);
 
+-- ================================================================
+-- 외부 연동(읽기 전용 API) — HSO 등 다른 시스템이 업장 문서를 가져간다
+-- ================================================================
+-- 연동 시스템(클라이언트)별 API 키. 키 원문은 저장하지 않고 SHA-256만 둔다
+CREATE TABLE IF NOT EXISTS api_clients (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name          text NOT NULL UNIQUE,               -- 예: hso
+  key_hash      text NOT NULL UNIQUE,
+  key_prefix    text NOT NULL,                      -- 키 앞 12자 (어떤 키인지 알아보는 용도)
+  active        boolean NOT NULL DEFAULT true,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  last_used_at  timestamptz
+);
+-- 업장 ↔ 상대 시스템의 지점 코드. 매핑된 업장의 문서만 내준다
+CREATE TABLE IF NOT EXISTS api_client_workplaces (
+  client_id     uuid NOT NULL REFERENCES api_clients(id) ON DELETE CASCADE,
+  workplace_id  uuid NOT NULL REFERENCES workplaces(id) ON DELETE CASCADE,
+  branch_code   text NOT NULL,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (client_id, workplace_id),
+  UNIQUE (client_id, branch_code)
+);
+
+-- 증분 동기화용 변경 시각: 문서·추출값·품목이 바뀌면 문서의 updated_at이 갱신된다
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+UPDATE documents SET updated_at = COALESCE(verified_at, created_at) WHERE updated_at IS NULL;
+ALTER TABLE documents ALTER COLUMN updated_at SET DEFAULT now();
+ALTER TABLE documents ALTER COLUMN updated_at SET NOT NULL;
+CREATE INDEX IF NOT EXISTS documents_updated_idx ON documents (workplace_id, updated_at, id);
+
+CREATE OR REPLACE FUNCTION documents_touch() RETURNS trigger AS $$
+BEGIN NEW.updated_at := now(); RETURN NEW; END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS documents_touch_trg ON documents;
+CREATE TRIGGER documents_touch_trg BEFORE UPDATE ON documents FOR EACH ROW EXECUTE FUNCTION documents_touch();
+
+-- 추출값이 바뀌면(검수 저장은 추출값을 통째로 다시 쓴다) 문서도 바뀐 것으로 본다
+CREATE OR REPLACE FUNCTION extracted_touch_document() RETURNS trigger AS $$
+BEGIN
+  UPDATE documents SET updated_at = now() WHERE id = COALESCE(NEW.document_id, OLD.document_id);
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS extracted_touch_document_trg ON extracted_data;
+CREATE TRIGGER extracted_touch_document_trg AFTER INSERT OR UPDATE OR DELETE ON extracted_data
+  FOR EACH ROW EXECUTE FUNCTION extracted_touch_document();
+
+-- 삭제된 문서 기록: 연동 시스템이 지운 문서를 알아 가도록 (90일 보관)
+CREATE TABLE IF NOT EXISTS document_deletions (
+  document_id   uuid PRIMARY KEY,
+  workplace_id  uuid NOT NULL,
+  deleted_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS document_deletions_idx ON document_deletions (workplace_id, deleted_at);
+CREATE OR REPLACE FUNCTION documents_record_deletion() RETURNS trigger AS $$
+BEGIN
+  INSERT INTO document_deletions (document_id, workplace_id) VALUES (OLD.id, OLD.workplace_id)
+  ON CONFLICT (document_id) DO UPDATE SET deleted_at = now();
+  RETURN OLD;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS documents_record_deletion_trg ON documents;
+CREATE TRIGGER documents_record_deletion_trg AFTER DELETE ON documents FOR EACH ROW EXECUTE FUNCTION documents_record_deletion();
+
 -- 회원이 탈퇴해도 업장 문서는 업장 자료이므로 남긴다 (올린 사람만 비움)
 ALTER TABLE documents ALTER COLUMN user_id DROP NOT NULL;
 DO $$ BEGIN
