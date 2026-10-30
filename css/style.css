@@ -326,6 +326,11 @@ button, input, select { font: inherit; color: inherit; }
 .logs-list li { display: grid; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
 .logs-list li.fail b { color: var(--err); }
 .logs-list small { color: var(--muted); font-size: 11px; }
+.pending-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
+.pending-list li { display: flex; align-items: center; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
+.pending-list li:first-child { border-top: 0; }
+.pending-list li > span { flex: 1; display: grid; min-width: 0; font-size: 14px; }
+.pending-list small { color: var(--muted); font-size: 12px; }
 .account-links { display: flex; justify-content: space-between; align-items: center; }
 .account-links a { font-size: 14px; }
 .account-links .btn { height: auto; padding: 4px 0; }

@@ -1,6 +1,6 @@
 // 업장 관리 명령 (서버 관리자용)
 //   node --env-file=.env manage.js workplaces                       업장 목록
-//   node --env-file=.env manage.js create-workplace <호텔명> <업장명>  업장을 만들고 가입 코드 발급
+//   node --env-file=.env manage.js create-workplace <업장코드> <업장명>  업장을 미리 만든다 (이 코드로 가입하면 승인 대기로 합류)
 //   node --env-file=.env manage.js issue-code <업장 id> [유효일수] [최대 사용 횟수]
 //   node --env-file=.env manage.js make-admin <이메일>               같은 업장의 관리자로 지정
 //   node --env-file=.env manage.js db-user-add <이름> [--read-only]  팀원 DB 계정 발급 (조회·수정, 또는 조회만)
@@ -121,19 +121,18 @@ async function issue(workplaceId, days, uses) {
   switch (cmd) {
     case 'workplaces': {
       const { rows } = await pool.query(
-        `SELECT w.id, w.hotel_name, w.name, count(u.id)::int AS members FROM workplaces w
+        `SELECT w.id, w.code, w.hotel_name, w.name, count(u.id)::int AS members FROM workplaces w
            LEFT JOIN users u ON u.workplace_id = w.id GROUP BY w.id ORDER BY w.hotel_name, w.name`,
       );
       console.table(rows);
       break;
     }
     case 'create-workplace': {
-      const [hotel, name] = args;
-      if (!hotel || !name) throw new Error('사용법: create-workplace <호텔명> <업장명>');
-      const { rows } = await pool.query('INSERT INTO workplaces (hotel_name, name) VALUES ($1, $2) RETURNING id', [hotel, name]);
-      const code = await issue(rows[0].id);
-      console.log(`업장 생성: ${hotel} / ${name} (${rows[0].id})`);
-      console.log(`가입 코드: ${fmtCode(code.code)}  — 이 코드로 처음 가입한 사람은 일반 회원입니다. 관리자로 바꾸려면 make-admin`);
+      const [code, name] = args;
+      if (!code || !name) throw new Error('사용법: create-workplace <업장코드> <업장명>');
+      const { rows } = await pool.query('INSERT INTO workplaces (hotel_name, name, code) VALUES ($1, $2, $1) RETURNING id', [code, name]);
+      console.log(`업장 생성: ${code} / ${name} (${rows[0].id})`);
+      console.log('이 업장코드로 가입한 사람은 승인 대기로 들어갑니다. 첫 관리자는 가입 후 make-admin 으로 지정하고 승인하세요');
       break;
     }
     case 'issue-code': {
@@ -144,7 +143,8 @@ async function issue(workplaceId, days, uses) {
       break;
     }
     case 'make-admin': {
-      const { rowCount } = await pool.query(`UPDATE users SET role = 'admin' WHERE email = $1`, [String(args[0] || '').toLowerCase()]);
+      // 관리자로 지정하면서 승인 대기도 풀어 준다
+      const { rowCount } = await pool.query(`UPDATE users SET role = 'admin', status = 'active' WHERE email = $1`, [String(args[0] || '').toLowerCase()]);
       console.log(rowCount ? '관리자로 지정했습니다' : '해당 이메일의 회원이 없습니다');
       break;
     }

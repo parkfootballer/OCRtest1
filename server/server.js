@@ -41,7 +41,8 @@ const DOC_TYPES = ['auto', 'giro', 'bill', 'invoice', 'tax_invoice'];
 const toUser = (r) => r && {
   id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at, phone: r.phone || null,
   privacyConsentRequired: r.privacy_version !== PRIVACY_VERSION, // 최신 고지에 동의하지 않은 회원(기존 회원 포함)
-  workplace: { id: r.workplace_id, hotelName: r.hotel_name, name: r.workplace_name },
+  status: r.status, // active | pending(관리자 승인 대기)
+  workplace: { id: r.workplace_id, code: r.workplace_code, hotelName: r.hotel_name, name: r.workplace_name },
 };
 const toDoc = (r) => r && {
   id: r.id, userId: r.user_id, documentType: r.document_type, imageUrl: r.image_url, status: r.status,
@@ -128,7 +129,7 @@ async function startSession(req, res, userId) {
   setSessionCookie(req, res, token, SESSION_DAYS * 86400);
 }
 
-const USER_SQL = `SELECT u.*, w.hotel_name, w.name AS workplace_name,
+const USER_SQL = `SELECT u.*, w.hotel_name, w.name AS workplace_name, w.code AS workplace_code,
     (SELECT c.version FROM user_consents c WHERE c.user_id = u.id AND c.consent_type = 'privacy' AND c.agreed
       ORDER BY c.created_at DESC LIMIT 1) AS privacy_version
   FROM users u JOIN workplaces w ON w.id = u.workplace_id`;
@@ -159,6 +160,14 @@ function requireConsent(req, res, next) {
   if (!req.user.privacyConsentRequired || CONSENT_FREE.includes(`${req.method} ${req.baseUrl}${req.path}`)) return next();
   next(new HttpError(403, '개인정보 수집·이용 동의가 필요합니다'));
 }
+// 승인 대기 회원은 업장 데이터(문서·재고 등)를 볼 수 없다. 내 정보 확인·동의·탈퇴만 가능
+function requireActive(req, res, next) {
+  if (req.user.status === 'active' || CONSENT_FREE.includes(`${req.method} ${req.baseUrl}${req.path}`)) return next();
+  next(new HttpError(403, '업장 관리자의 승인을 기다리고 있습니다'));
+}
+// 업장코드 정규화: 공백 제거·대문자 (DB의 workplaces.code_key와 같은 규칙)
+const codeKey = (s) => String(s || '').replace(/\s/g, '').toUpperCase();
+const validCode = (s) => /^[0-9A-Za-z가-힣_\-.]{2,30}$/.test(String(s || '').replace(/\s/g, ''));
 const wpId = (req) => req.user.workplace.id;
 
 // ---------- 접속기록 ----------
@@ -172,7 +181,8 @@ const AUDIT_ACTIONS = {
   'GET /api/workplace': 'workplace.view',
   'PATCH /api/workplace': 'workplace.update',
   'PUT /api/workplace/training-consent': 'consent.training',
-  'PATCH /api/workplace/members/:id': 'member.role',
+  'PATCH /api/workplace/members/:id': 'member.update', // 가입 승인·권한 변경
+  'DELETE /api/workplace/members/:id': 'member.reject',
   'POST /api/workplace/codes': 'code.issue',
   'DELETE /api/workplace/codes/:id': 'code.delete',
   'GET /api/workplace/access-logs': 'access_log.view',
@@ -349,7 +359,16 @@ app.use('/api/ext/v1', partnerRouter({
 
 app.use('/api', wrap(loadUser));
 
-// 가입 코드 확인 → 어느 호텔·업장의 코드인지 알려 준다 (가입 화면에서 호텔명·업장명 확인용)
+// 업장코드 확인 → 이미 있는 업장인지만 알려 준다 (업장 이름은 알려 주지 않음: 코드를 넣어 보며 업장을 알아내지 못하게)
+app.post('/api/auth/check-workplace', wrap(async (req, res) => {
+  rateLimit(req);
+  const code = req.body?.code;
+  if (!validCode(code)) throw new HttpError(400, '업장코드는 영문·숫자·한글·-_. 2~30자로 입력하세요');
+  const exists = !!(await pool.query('SELECT 1 FROM workplaces WHERE code_key = $1', [codeKey(code)])).rows[0];
+  res.json({ exists });
+}));
+
+// (예전 방식) 가입 코드 확인 — 지금 가입 화면에서는 쓰지 않는다
 app.post('/api/auth/check-code', wrap(async (req, res) => {
   rateLimit(req);
   if (isMasterCode(req.body?.code)) return res.json({ valid: true, newWorkplace: true });
@@ -426,15 +445,17 @@ app.post('/api/auth/phone/verify', wrap(async (req, res) => {
 
 app.post('/api/auth/signup', wrap(async (req, res) => {
   rateLimit(req);
-  const { email, name, password, code, hotelName, phoneToken } = req.body || {};
+  // name: 화면 표시는 "업장명" (회원 이름 칸). workplaceCode: 수기 입력 업장코드
+  const { email, name, password, workplaceCode, phoneToken } = req.body || {};
   const mail = String(email || '').trim().toLowerCase();
-  const hotel = String(hotelName || '').trim();
+  const wpName = String(name || '').trim();
+  const code = String(workplaceCode || '').trim();
   const phone = normPhone(req.body?.phone);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) throw new HttpError(400, '이메일 형식이 올바르지 않습니다');
-  if (!name || !String(name).trim()) throw new HttpError(400, '이름을 입력하세요');
+  if (!wpName) throw new HttpError(400, '업장명을 입력하세요');
+  if (wpName.length > 80) throw new HttpError(400, '업장명이 너무 깁니다');
   if (String(password || '').length < 8) throw new HttpError(400, '비밀번호는 8자 이상이어야 합니다');
-  if (!hotel) throw new HttpError(400, '호텔명을 입력하세요');
-  if (hotel.length > 80) throw new HttpError(400, '호텔명이 너무 깁니다');
+  if (!validCode(code)) throw new HttpError(400, '업장코드는 영문·숫자·한글·-_. 2~30자로 입력하세요');
   if (!isMobile(phone) || !phoneToken) throw new HttpError(400, '휴대폰 문자 인증을 완료하세요');
   // 필수 동의: 화면에 보여 준 고지문 버전과 서버의 현재 버전이 같아야 한다
   if (req.body?.consents?.privacy !== PRIVACY_VERSION) throw new HttpError(400, '개인정보 수집·이용에 동의해야 가입할 수 있습니다');
@@ -452,37 +473,33 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
     if (!pv) throw new HttpError(400, '휴대폰 인증이 만료되었습니다. 다시 인증해 주세요');
     await c.query('UPDATE phone_verifications SET used_at = now() WHERE id = $1', [pv.id]);
 
-    let workplaceId;
-    let role = 'member';
-    if (isMasterCode(code)) {
-      // 새 업장 개설: 업장명은 '기본 업장'으로 만들고 관리자가 내 정보에서 바꾼다
-      const { rows } = await c.query(
-        `INSERT INTO workplaces (hotel_name, name) VALUES ($1, '기본 업장')
-         ON CONFLICT (hotel_key, name_key) DO NOTHING RETURNING id`,
-        [hotel],
-      );
-      if (!rows[0]) throw new HttpError(409, '이미 등록된 호텔입니다. 업장 관리자에게 가입 코드를 받아 가입하세요');
-      workplaceId = rows[0].id;
-      role = 'admin';
-    } else {
-      // 업장은 가입 코드로 정해진다. 호텔명은 코드의 호텔과 맞는지만 확인한다
-      const sc = await usableCode(c, code, true);
-      if (nameKey(sc.hotel_name) !== nameKey(hotel)) throw new HttpError(400, '가입 코드의 호텔명과 입력한 호텔명이 다릅니다');
-      await c.query('UPDATE signup_codes SET use_count = use_count + 1 WHERE id = $1', [sc.id]);
-      workplaceId = sc.workplace_id;
+    // 업장코드로 업장 찾기: 처음 쓰는 코드면 새 업장(가입자 = 관리자), 이미 있으면 승인 대기로 합류.
+    // 동시에 같은 새 코드로 가입해도 업장은 하나만 생기도록 INSERT … ON CONFLICT 로 처리
+    let role = 'admin';
+    let status = 'active';
+    let { rows: [wp] } = await c.query(
+      `INSERT INTO workplaces (hotel_name, name, code) VALUES ($1, $2, $1) ON CONFLICT DO NOTHING RETURNING id`,
+      [code, wpName],
+    );
+    if (!wp) {
+      ({ rows: [wp] } = await c.query('SELECT id FROM workplaces WHERE code_key = $1', [codeKey(code)]));
+      if (!wp) throw new HttpError(409, '같은 이름의 업장이 이미 있습니다. 다른 업장코드나 업장명을 입력하세요');
+      role = 'member';
+      status = 'pending';
     }
+    const workplaceId = wp.id;
     const { rows } = await c.query(
-      `INSERT INTO users (email, name, password_hash, workplace_id, role, phone, phone_verified_at)
-       VALUES ($1, $2, $3, $4, $5, $6, now())
+      `INSERT INTO users (email, name, password_hash, workplace_id, role, status, phone, phone_verified_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now())
        ON CONFLICT (email) DO NOTHING RETURNING id`,
-      [mail, String(name).trim(), await hashPassword(password), workplaceId, role, phone],
+      [mail, wpName, await hashPassword(password), workplaceId, role, status, phone],
     );
     if (!rows[0]) throw new HttpError(409, '이미 가입된 이메일입니다');
     await c.query(
       `INSERT INTO user_consents (user_id, consent_type, version, agreed, ip) VALUES ($1, 'privacy', $2, true, $3)`,
       [rows[0].id, PRIVACY_VERSION, req.ip],
     );
-    res.locals.audit = { userId: rows[0].id, workplaceId };
+    res.locals.audit = { userId: rows[0].id, workplaceId, detail: { joined: status === 'pending' ? 'pending' : 'created' } };
     return rows[0].id;
   });
   await startSession(req, res, userId);
@@ -517,6 +534,7 @@ app.get('/api/auth/config', (req, res) => res.json({
 // 이하 모든 API는 로그인 + 최신 개인정보 고지 동의 필요
 app.use('/api', requireUser);
 app.use('/api', requireConsent);
+app.use('/api', requireActive);
 
 app.get('/api/me', (req, res) => res.json(req.user));
 
@@ -553,8 +571,12 @@ app.delete('/api/me', wrap(async (req, res) => {
 // ---------- 업장 ----------
 app.get('/api/workplace', wrap(async (req, res) => {
   const members = (await pool.query(
-    'SELECT id, name, email, role, created_at FROM users WHERE workplace_id = $1 ORDER BY created_at', [wpId(req)],
-  )).rows.map((r) => ({ id: r.id, name: r.name, email: r.email, role: r.role, createdAt: r.created_at }));
+    'SELECT id, name, email, role, status, phone, created_at FROM users WHERE workplace_id = $1 ORDER BY created_at', [wpId(req)],
+  )).rows.map((r) => ({
+    id: r.id, name: r.name, email: r.email, role: r.role, status: r.status, createdAt: r.created_at,
+    // 승인 대기자를 알아볼 수 있도록 관리자에게만 휴대폰 번호 표시
+    phone: req.user.role === 'admin' ? r.phone : undefined,
+  }));
   const codes = req.user.role === 'admin' ? (await pool.query(
     `SELECT sc.*, u.name AS created_by_name FROM signup_codes sc LEFT JOIN users u ON u.id = sc.created_by
       WHERE sc.workplace_id = $1 AND sc.active ORDER BY sc.created_at DESC LIMIT 50`, [wpId(req)],
@@ -593,15 +615,36 @@ app.put('/api/workplace/training-consent', requireAdmin, wrap(async (req, res) =
 }));
 
 // 구성원 권한 변경 (관리자 지정·해제). 관리자가 한 명도 남지 않게 할 수는 없다
+// body: { status: 'active' } 가입 승인 / { role: 'admin' | 'member' } 권한 변경
 app.patch('/api/workplace/members/:id', requireAdmin, wrap(async (req, res) => {
-  const role = req.body?.role;
-  if (!['admin', 'member'].includes(role) || !isUuid(req.params.id)) throw new HttpError(400, '잘못된 요청입니다');
+  const { role, status } = req.body || {};
+  if (!isUuid(req.params.id) || (status !== undefined && status !== 'active') || (role !== undefined && !['admin', 'member'].includes(role))) {
+    throw new HttpError(400, '잘못된 요청입니다');
+  }
   await withTx(async (c) => {
-    const { rowCount } = await c.query('UPDATE users SET role = $1 WHERE id = $2 AND workplace_id = $3', [role, req.params.id, wpId(req)]);
-    if (!rowCount) throw new HttpError(404, '구성원이 없습니다');
-    const { rows: [n] } = await c.query(`SELECT count(*)::int AS n FROM users WHERE workplace_id = $1 AND role = 'admin'`, [wpId(req)]);
-    if (!n.n) throw new HttpError(409, '업장에 관리자가 한 명은 있어야 합니다');
+    const { rows: [m] } = await c.query('SELECT status FROM users WHERE id = $1 AND workplace_id = $2 FOR UPDATE', [req.params.id, wpId(req)]);
+    if (!m) throw new HttpError(404, '구성원이 없습니다');
+    if (status === 'active') {
+      await c.query(`UPDATE users SET status = 'active' WHERE id = $1`, [req.params.id]);
+      res.locals.audit = { detail: { approved: true } };
+    }
+    if (role) {
+      if (m.status === 'pending' && status !== 'active') throw new HttpError(409, '승인 대기 중인 회원은 먼저 승인하세요');
+      await c.query('UPDATE users SET role = $1 WHERE id = $2', [role, req.params.id]);
+      const { rows: [n] } = await c.query(`SELECT count(*)::int AS n FROM users WHERE workplace_id = $1 AND role = 'admin'`, [wpId(req)]);
+      if (!n.n) throw new HttpError(409, '업장에 관리자가 한 명은 있어야 합니다');
+    }
   });
+  res.status(204).end();
+}));
+
+// 가입 거절: 승인 대기 중인 회원만 삭제할 수 있다 (같은 번호·이메일로 다시 가입 가능)
+app.delete('/api/workplace/members/:id', requireAdmin, wrap(async (req, res) => {
+  if (!isUuid(req.params.id)) throw new HttpError(404, '구성원이 없습니다');
+  const { rowCount } = await pool.query(
+    `DELETE FROM users WHERE id = $1 AND workplace_id = $2 AND status = 'pending'`, [req.params.id, wpId(req)],
+  );
+  if (!rowCount) throw new HttpError(404, '승인 대기 중인 회원이 없습니다');
   res.status(204).end();
 }));
 
@@ -618,16 +661,19 @@ app.get('/api/workplace/access-logs', requireAdmin, wrap(async (req, res) => {
   })));
 }));
 
+// 업장코드·업장명 수정 (관리자). 업장코드는 다른 업장과 겹칠 수 없다
 app.patch('/api/workplace', requireAdmin, wrap(async (req, res) => {
-  const hotel = String(req.body?.hotelName || '').trim();
+  const code = String(req.body?.code || '').trim();
   const name = String(req.body?.name || '').trim();
-  if (!hotel || !name) throw new HttpError(400, '호텔명과 업장명을 입력하세요');
+  if (!validCode(code)) throw new HttpError(400, '업장코드는 영문·숫자·한글·-_. 2~30자로 입력하세요');
+  if (!name || name.length > 80) throw new HttpError(400, '업장명을 입력하세요');
   try {
-    await pool.query('UPDATE workplaces SET hotel_name = $1, name = $2 WHERE id = $3', [hotel, name, wpId(req)]);
+    await pool.query('UPDATE workplaces SET code = $1, name = $2 WHERE id = $3', [code, name, wpId(req)]);
   } catch (e) {
-    if (e.code === '23505') throw new HttpError(409, '같은 호텔에 같은 이름의 업장이 이미 있습니다');
+    if (e.code === '23505') throw new HttpError(409, '이미 다른 업장이 쓰는 업장코드(또는 이름)입니다');
     throw e;
   }
+  res.locals.audit = { detail: { code, name } };
   res.json(await userById(pool, req.user.id));
 }));
 

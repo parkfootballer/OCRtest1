@@ -24,6 +24,11 @@ const DB = (() => {
   async function currentUser() {
     return me || (me = await api('GET', '/me'));
   }
+  // 저장해 둔 내 정보 대신 서버에서 다시 받기 (가입 승인 여부 확인 등)
+  async function refreshMe() {
+    me = await api('GET', '/me');
+    return me;
+  }
 
   async function login(email, password) {
     me = await api('POST', '/auth/login', { email, password });
@@ -48,8 +53,8 @@ const DB = (() => {
     await api('DELETE', '/me', { password });
     me = null;
   }
-  // 가입 코드 확인 → { newWorkplace, hotelName, workplaceName }
-  const checkCode = (code) => api('POST', '/auth/check-code', { code });
+  // 업장코드 확인 → { exists } (이미 있는 업장이면 가입 후 관리자 승인 필요)
+  const checkWorkplace = (code) => api('POST', '/auth/check-workplace', { code });
   // 휴대폰 문자 인증: 인증번호 받기 → { expiresIn }, 확인 → { verificationToken } (가입 때 phoneToken으로 제출)
   const sendPhoneCode = (phone) => api('POST', '/auth/phone/send', { phone });
   const verifyPhoneCode = (phone, code) => api('POST', '/auth/phone/verify', { phone, code });
@@ -124,6 +129,9 @@ const DB = (() => {
   // OCR 학습 데이터 활용 동의(선택): agree=false면 철회 + 모은 학습 데이터 파기
   const setTrainingConsent = (agree, version) => api('PUT', '/workplace/training-consent', { agree, version });
   const setMemberRole = (id, role) => api('PATCH', `/workplace/members/${id}`, { role });
+  // 가입 승인 / 거절(승인 대기 회원 삭제)
+  const approveMember = (id) => api('PATCH', `/workplace/members/${id}`, { status: 'active' });
+  const rejectMember = (id) => api('DELETE', `/workplace/members/${id}`);
   const accessLogs = () => api('GET', '/workplace/access-logs');
 
   // ---- 재고 ----
@@ -131,10 +139,10 @@ const DB = (() => {
   const inventoryItem = (id) => api('GET', `/inventory/${id}`);
 
   return {
-    currentUser, login, signup, logout, authConfig, checkCode, sendPhoneCode, verifyPhoneCode, createDocument, saveExtraction, documentBundle,
+    currentUser, refreshMe, login, signup, logout, authConfig, checkWorkplace, sendPhoneCode, verifyPhoneCode, createDocument, saveExtraction, documentBundle,
     listDocuments, setStatus, logReview, deleteDocument, exportAll, memory,
     checkFileDuplicates, documentDuplicates, setDuplicate, saveOcrResult,
     workplace, updateWorkplace, issueCode, deleteCode, inventory, inventoryItem,
-    agreePrivacy, deleteAccount, setTrainingConsent, setMemberRole, accessLogs,
+    agreePrivacy, deleteAccount, setTrainingConsent, setMemberRole, approveMember, rejectMember, accessLogs,
   };
 })();

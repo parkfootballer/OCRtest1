@@ -45,7 +45,7 @@ function toDocument(r, withItems) {
     id: r.id,
     workplaceId: r.workplace_id, // 업장(지점) 고유 id — 바뀌지 않음. 지점 코드가 없을 때 지점 구분용
     branchCode: r.branch_code,   // 연결된 지점 코드 (전체 허용 키에서 연결 안 된 업장은 null)
-    workplace: { hotelName: r.hotel_name, name: r.workplace_name },
+    workplace: { code: r.workplace_code, hotelName: r.hotel_name, name: r.workplace_name }, // code: 업장코드
     documentType: r.document_type,
     documentTypeLabel: TYPE_LABELS[r.document_type] || r.document_type,
     reviewStatus: r.status === 'verified' ? 'confirmed' : 'unconfirmed', // 확인 / 미확인
@@ -79,7 +79,7 @@ function toDocument(r, withItems) {
 const DOC_SELECT = `
   SELECT d.id, d.document_type, d.status, d.verified_by, d.verified_at, d.created_at, ${US('d.updated_at')} AS updated_at_us,
          d.duplicate_decision, d.duplicate_of, d.workplace_id,
-         m.branch_code, w.hotel_name, w.name AS workplace_name,
+         m.branch_code, w.hotel_name, w.name AS workplace_name, w.code AS workplace_code,
          e.vendor_name, e.business_number, e.document_number, e.issue_date, e.due_date, e.billing_month,
          e.total_amount, e.tax_amount,
          (SELECT count(*)::int FROM line_items l WHERE l.extracted_data_id = e.id) AS item_count
@@ -122,7 +122,7 @@ module.exports = function partnerRouter({ pool, onAudit }) {
   r.get('/branches', wrap(async (req, res) => {
     res.locals.audit = { action: 'partner.branches' };
     const { rows } = await pool.query(
-      `SELECT w.id, m.branch_code, w.hotel_name, w.name FROM workplaces w
+      `SELECT w.id, w.code, m.branch_code, w.hotel_name, w.name FROM workplaces w
          LEFT JOIN api_client_workplaces m ON m.workplace_id = w.id AND m.client_id = $1
         WHERE ${scope(req.client)} ORDER BY w.hotel_name, w.name`,
       [req.client.id],
@@ -130,7 +130,7 @@ module.exports = function partnerRouter({ pool, onAudit }) {
     res.json({
       client: req.client.name,
       scope: req.client.all_workplaces ? 'all' : 'mapped', // all: 모든 업장 / mapped: 연결한 지점만
-      branches: rows.map((x) => ({ workplaceId: x.id, branchCode: x.branch_code, hotelName: x.hotel_name, workplaceName: x.name })),
+      branches: rows.map((x) => ({ workplaceId: x.id, workplaceCode: x.code, branchCode: x.branch_code, hotelName: x.hotel_name, workplaceName: x.name })),
     });
   }));
 

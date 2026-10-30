@@ -68,7 +68,8 @@ API 키와 지점 연결은 찰칵장부 운영자가 발급합니다(아래 7�
 | 필드 | 설명 |
 |---|---|
 | `id` | 문서 id (UUID, 바뀌지 않음) — 상대 시스템의 중복 방지 키로 쓰세요 |
-| `workplaceId` | 업장(지점) 고유 id — 지점 구분에 쓰세요 |
+| `workplaceId` | 업장(지점) 고유 id — 지점 구분에 쓰세요 (바뀌지 않음) |
+| `workplace.code` | 업장코드 (가입 때 입력, 관리자가 바꿀 수 있으므로 키로 쓰지 말고 표시·대조용으로) |
 | `branchCode` | 연결된 상대 시스템의 지점 코드 (연결하지 않았으면 `null`) |
 | `documentType` / `documentTypeLabel` | `giro` 지로, `bill` 고지서, `invoice` 거래명세서, `tax_invoice` 세금계산서 |
 | `reviewStatus` | `confirmed` 확인(사람 검수 또는 자동 확정) / `unconfirmed` 미확인(검수 대기·재촬영 필요) |

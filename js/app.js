@@ -46,6 +46,8 @@
     return `<span class="badge ${cls}">${label}</span>`;
   }
   const typeLabel = (t) => Parser.DOC_TYPES[t] || t;
+  // 업장 표시: "업장코드 · 업장명" (업장코드가 없는 예전 업장은 호텔명)
+  const wpLabel = (w) => `${w.code || w.hotelName} · ${w.name}`;
   const dateLabel = (iso) => new Date(iso).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const qtyLabel = (n) => (n == null ? '' : Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 3 }));
   const INVENTORY_TYPES = ['invoice', 'tax_invoice']; // 비품 구매 문서 → 재고 반영
@@ -154,7 +156,7 @@
 
     h(`
       <header class="top">
-        <h1>${mode === 'queue' ? '검수함' : '문서함'}<small class="wp">${esc(user.workplace.hotelName)} · ${esc(user.workplace.name)}</small></h1>
+        <h1>${mode === 'queue' ? '검수함' : '문서함'}<small class="wp">${esc(wpLabel(user.workplace))}</small></h1>
         ${mode === 'queue' ? '' : `<a class="avatar" href="#/me" aria-label="내 정보">${esc((user.name || '?').slice(0, 1))}</a>`}
       </header>
       ${mode !== 'queue' && installState() !== 'installed' && installState() !== 'unsupported' ? `
@@ -855,7 +857,7 @@
   async function renderInventory() {
     const list = await DB.inventory();
     h(`
-      <header class="top"><h1>재고<small class="wp">${esc(user.workplace.hotelName)} · ${esc(user.workplace.name)}</small></h1></header>
+      <header class="top"><h1>재고<small class="wp">${esc(wpLabel(user.workplace))}</small></h1></header>
       <div class="review">
         <p class="muted inv-note">검수 완료된 거래명세서·세금계산서의 품목이 입고로 쌓입니다. 이름이 같은 품목(공백·대소문자 무시)은 하나로 합쳐집니다.</p>
         ${list.length ? `<input class="search" id="invSearch" placeholder="품목 검색" type="search">` : ''}
@@ -917,11 +919,10 @@
   async function renderLogin(params) {
     const mode = params.get('mode') === 'signup' ? 'signup' : 'login';
     const signupFields = `
-      <label class="field"><span class="lbl">업장 가입 코드</span>
-        <input name="code" autocomplete="off" autocapitalize="characters" placeholder="ABCD-EFGH" required value="${esc(params.get('code') || '')}">
-        <small id="codeMsg" class="code-msg">업장 관리자에게 받은 코드를 입력하세요</small></label>
-      <label class="field"><span class="lbl">호텔명</span><input name="hotelName" autocomplete="organization" required></label>
-      <label class="field"><span class="lbl">이름</span><input name="name" autocomplete="name" required></label>
+      <label class="field"><span class="lbl">업장코드</span>
+        <input name="workplaceCode" autocomplete="off" placeholder="예: HS-001" maxlength="30" required>
+        <small id="codeMsg" class="code-msg">업장코드를 입력하세요. 나중에 내 정보에서 바꿀 수 있습니다</small></label>
+      <label class="field"><span class="lbl">업장명</span><input name="name" autocomplete="organization" required></label>
       <div class="field">
         <span class="lbl">휴대폰 번호</span>
         <div class="with-btn">
@@ -965,7 +966,6 @@
     let phoneToken = null; // 문자 인증 성공 시 받은 가입용 토큰
     let verifiedPhone = null;
     if (mode === 'signup') {
-      // 코드를 입력하면 어느 업장의 코드인지 확인하고 호텔명을 채워 준다 (업장은 코드로 정해지고, 서버가 가입 때 다시 검증)
       const form = document.getElementById('authForm');
       const msg = document.getElementById('codeMsg');
 
@@ -1024,29 +1024,26 @@
         }
       });
 
+      // 업장코드를 입력하면 새 업장인지, 이미 있는 업장(→ 관리자 승인 후 이용)인지 알려 준다
       let lastCode = '';
       const check = async () => {
-        const raw = form.code.value.trim();
-        const norm = raw.toUpperCase().replace(/[^0-9A-Z]/g, '');
+        const raw = form.workplaceCode.value.trim();
+        const norm = raw.replace(/\s/g, '').toUpperCase();
         if (!norm || norm === lastCode) return;
         lastCode = norm;
         try {
-          const r = await DB.checkCode(raw);
-          if (r.newWorkplace) {
-            msg.textContent = '새 업장 개설 코드입니다. 입력한 호텔에 "기본 업장"이 만들어지고 관리자로 가입됩니다 (업장명은 내 정보에서 변경)';
-          } else {
-            form.hotelName.value = r.hotelName;
-            msg.textContent = `✓ ${r.hotelName} · ${r.workplaceName} 업장의 코드입니다`;
-          }
-          msg.className = 'code-msg ok';
+          const r = await DB.checkWorkplace(raw);
+          msg.textContent = r.exists
+            ? '이미 등록된 업장코드입니다. 가입하면 그 업장 관리자가 승인한 뒤 이용할 수 있습니다'
+            : '새 업장코드입니다. 가입하면 이 업장이 만들어지고 관리자가 됩니다';
+          msg.className = `code-msg ${r.exists ? '' : 'ok'}`;
         } catch (e) {
           msg.textContent = e.message;
           msg.className = 'code-msg bad';
         }
       };
-      form.code.addEventListener('change', check);
-      form.code.addEventListener('blur', check);
-      if (form.code.value) check();
+      form.workplaceCode.addEventListener('change', check);
+      form.workplaceCode.addEventListener('blur', check);
     }
     document.getElementById('authForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1067,9 +1064,10 @@
       err.hidden = true;
       try {
         user = mode === 'signup'
-          ? await DB.signup({ email: f.email, password: f.password, name: f.name, code: f.code, hotelName: f.hotelName, phone: verifiedPhone, phoneToken, consents: { privacy: Policy.PRIVACY_VERSION } })
+          ? await DB.signup({ email: f.email, password: f.password, name: f.name, workplaceCode: f.workplaceCode, phone: verifiedPhone, phoneToken, consents: { privacy: Policy.PRIVACY_VERSION } })
           : await DB.login(f.email, f.password);
         if (user.privacyConsentRequired) return (location.hash = '#/consent');
+        if (user.status === 'pending') return (location.hash = '#/pending');
         await refreshBadge();
         location.hash = '#/';
       } catch (ex) {
@@ -1081,38 +1079,35 @@
   }
 
   // ---------- 내 정보 ----------
-  const fmtCode = (c) => `${c.slice(0, 4)}-${c.slice(4)}`;
-  // 삭제한 코드는 목록에 오지 않는다. 남은 코드 중 기한·횟수가 다 된 것만 따로 표시
-  function codeState(c) {
-    if (c.expiresAt && new Date(c.expiresAt) < new Date()) return ['만료', 'off'];
-    if (c.maxUses != null && c.useCount >= c.maxUses) return ['사용 완료', 'off'];
-    return ['사용 가능', 'on'];
-  }
+  const fmtPhone = (p) => String(p || '').replace(/^(\d{3})(\d{3,4})(\d{4})$/, '$1-$2-$3');
 
   async function renderMe() {
     const st = installState();
     const isAdmin = user.role === 'admin';
     const wp = await DB.workplace();
+    const active = wp.members.filter((m) => m.status !== 'pending');
+    const pending = wp.members.filter((m) => m.status === 'pending');
     h(`
       <header class="top"><a href="#/" class="back">‹</a><h1>내 정보</h1></header>
       <div class="review">
         <section class="card profile">
           <span class="avatar lg">${esc((user.name || '?').slice(0, 1))}</span>
-          <div><b>${esc(user.name)}</b><p class="muted">${esc(user.email)}${user.phone ? ` · ${esc(user.phone.replace(/^(\d{3})(\d{3,4})(\d{4})$/, '$1-$2-$3'))}` : ''}</p></div>
+          <div><b>${esc(user.name)}</b><p class="muted">${esc(user.email)}${user.phone ? ` · ${esc(fmtPhone(user.phone))}` : ''}</p></div>
         </section>
 
         <section class="card">
           <div class="card-h"><h2>소속 업장</h2><span class="badge ${isAdmin ? 'st-ok' : 'st-proc'}">${isAdmin ? '관리자' : '구성원'}</span></div>
-          <p class="wp-name"><b>${esc(user.workplace.hotelName)}</b> · ${esc(user.workplace.name)}</p>
+          <p class="wp-name"><b>${esc(user.workplace.code || user.workplace.hotelName)}</b> · ${esc(user.workplace.name)}</p>
+          ${user.workplace.code ? '' : '<p class="muted"><b>업장코드가 아직 없습니다.</b> 관리자가 아래 "업장 정보 수정"에서 정해 주세요. 그래야 같은 업장 사람들이 업장코드로 가입할 수 있습니다.</p>'}
           <p class="muted">같은 업장 구성원끼리만 문서·재고를 함께 봅니다. 다른 업장의 데이터는 보이지 않습니다.</p>
-          <details class="members"><summary>구성원 ${wp.members.length}명</summary>
-            <ul>${wp.members.map((m) => `<li class="member"><span>${esc(m.name)} <small>${esc(m.email)}${m.role === 'admin' ? ' · 관리자' : ''}</small></span>
+          <details class="members"><summary>구성원 ${active.length}명</summary>
+            <ul>${active.map((m) => `<li class="member"><span>${esc(m.name)} <small>${esc(m.email)}${m.role === 'admin' ? ' · 관리자' : ''}</small></span>
               ${isAdmin && m.id !== user.id ? `<button class="ghost sm" data-role="${m.role === 'admin' ? 'member' : 'admin'}" data-member="${m.id}">${m.role === 'admin' ? '관리자 해제' : '관리자 지정'}</button>` : ''}</li>`).join('')}</ul>
           </details>
           ${isAdmin ? `
           <details class="members"><summary>업장 정보 수정</summary>
             <form id="wpForm" class="wp-form">
-              <label class="field"><span class="lbl">호텔명</span><input name="hotelName" value="${esc(user.workplace.hotelName)}" required></label>
+              <label class="field"><span class="lbl">업장코드</span><input name="code" value="${esc(user.workplace.code || '')}" maxlength="30" placeholder="예: HS-001" required></label>
               <label class="field"><span class="lbl">업장명</span><input name="name" value="${esc(user.workplace.name)}" required></label>
               <button class="btn ghost block">저장</button>
             </form>
@@ -1121,22 +1116,13 @@
 
         ${isAdmin ? `
         <section class="card">
-          <div class="card-h"><h2>가입 코드</h2></div>
-          <p class="muted">새 구성원은 이 코드와 호텔명을 입력해 가입합니다.</p>
-          <form id="codeForm" class="code-form">
-            <select name="expiresInDays"><option value="7">7일 유효</option><option value="30" selected>30일 유효</option><option value="">기한 없음</option></select>
-            <select name="maxUses"><option value="1">1회용</option><option value="10" selected>10명까지</option><option value="">제한 없음</option></select>
-            <button class="btn primary">코드 발급</button>
-          </form>
-          <ul class="codes">${wp.codes.map((c) => {
-            const [label, cls] = codeState(c);
-            return `<li class="${cls}">
-              <code>${fmtCode(c.code)}</code>
-              <span><em>${label}</em><small>${c.useCount}${c.maxUses != null ? `/${c.maxUses}` : ''}명 가입${c.expiresAt ? ` · ${new Date(c.expiresAt).toLocaleDateString('ko-KR')}까지` : ''}</small></span>
-              ${cls === 'on' ? `<button class="ghost sm" data-copy="${c.code}">복사</button>` : ''}
-              <button class="ghost sm danger-text" data-delete="${c.id}" data-code="${c.code}">삭제</button>
-            </li>`;
-          }).join('') || '<li class="muted">발급한 코드가 없습니다.</li>'}</ul>
+          <div class="card-h"><h2>가입 승인</h2>${pending.length ? `<span class="badge st-review">대기 ${pending.length}명</span>` : ''}</div>
+          <p class="muted">업장코드 <b>${esc(user.workplace.code || '(미정)')}</b>로 가입한 사람은 승인해야 문서·재고를 볼 수 있습니다. 모르는 사람은 거절하세요.</p>
+          <ul class="pending-list">${pending.map((m) => `
+            <li><span><b>${esc(m.name)}</b><small>${esc(m.email)}${m.phone ? ` · ${esc(fmtPhone(m.phone))}` : ''} · ${dateLabel(m.createdAt)} 가입</small></span>
+              <button class="ghost sm" data-approve="${m.id}">승인</button>
+              <button class="ghost sm danger-text" data-reject="${m.id}" data-name="${esc(m.name)}">거절</button></li>`).join('')
+            || '<li class="muted">승인을 기다리는 사람이 없습니다.</li>'}</ul>
         </section>
 
         <section class="card">
@@ -1207,7 +1193,8 @@
     const ACTION_LABELS = {
       'auth.signup': '가입', 'auth.login': '로그인', 'auth.logout': '로그아웃', 'consent.privacy': '개인정보 동의',
       'account.delete': '회원 탈퇴', 'workplace.view': '업장 정보 열람', 'workplace.update': '업장 정보 수정',
-      'consent.training': '학습 데이터 동의 변경', 'member.role': '권한 변경', 'code.issue': '가입 코드 발급',
+      'consent.training': '학습 데이터 동의 변경', 'member.role': '권한 변경', 'member.update': '가입 승인·권한 변경',
+      'member.reject': '가입 거절', 'code.issue': '가입 코드 발급',
       'code.delete': '가입 코드 삭제', 'access_log.view': '접속기록 열람', 'document.create': '문서 등록',
       'document.view': '문서 열람', 'document.update': '문서 상태 변경', 'document.save': '문서 내용 저장',
       'document.delete': '문서 삭제', 'inventory.view': '재고 열람', 'data.export': '전체 데이터 내보내기',
@@ -1260,33 +1247,31 @@
       download(await DB.exportAll(), `chalkak-${new Date().toISOString().slice(0, 10)}.json`);
     });
 
-    // ---- 관리자: 업장 정보·가입 코드 ----
+    // ---- 관리자: 업장코드·업장명 수정, 가입 승인·거절 ----
     document.getElementById('wpForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      user = await DB.updateWorkplace(Object.fromEntries(new FormData(e.target)));
-      toast('업장 정보를 저장했습니다');
-      renderMe();
+      try {
+        user = await DB.updateWorkplace(Object.fromEntries(new FormData(e.target)));
+        toast('업장 정보를 저장했습니다');
+        renderMe();
+      } catch (ex) {
+        toast(ex.message);
+      }
     });
-    document.getElementById('codeForm')?.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const f = Object.fromEntries(new FormData(e.target));
-      const c = await DB.issueCode({ expiresInDays: f.expiresInDays || null, maxUses: f.maxUses || null });
-      toast(`가입 코드 ${fmtCode(c.code)} 발급`);
+    $view.querySelectorAll('[data-approve]').forEach((b) => b.addEventListener('click', async () => {
+      await DB.approveMember(b.dataset.approve);
+      toast('가입을 승인했습니다');
       renderMe();
-    });
-    $view.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
-      const text = `${user.workplace.hotelName} · ${user.workplace.name} 가입 코드: ${fmtCode(b.dataset.copy)}`;
-      try { await navigator.clipboard.writeText(text); toast('복사했습니다'); } catch { prompt('코드를 복사하세요', text); }
     }));
-    $view.querySelectorAll('[data-delete]').forEach((b) => b.addEventListener('click', async () => {
+    $view.querySelectorAll('[data-reject]').forEach((b) => b.addEventListener('click', async () => {
       const ok = await dialog({
-        title: '가입 코드를 삭제할까요?',
-        body: `<p><b>${fmtCode(b.dataset.code)}</b> 코드로는 더 이상 가입할 수 없고 목록에서도 사라집니다. 이미 가입한 구성원은 그대로입니다.</p>`,
-        actions: [{ label: '취소', value: false }, { label: '삭제', value: true, cls: 'danger-fill' }],
+        title: '가입을 거절할까요?',
+        body: `<p><b>${esc(b.dataset.name)}</b> 님의 가입 신청이 삭제됩니다. 필요하면 다시 가입할 수 있습니다.</p>`,
+        actions: [{ label: '취소', value: false }, { label: '거절', value: true, cls: 'danger-fill' }],
       });
       if (!ok) return;
-      await DB.deleteCode(b.dataset.delete);
-      toast('가입 코드를 삭제했습니다');
+      await DB.rejectMember(b.dataset.reject);
+      toast('가입을 거절했습니다');
       renderMe();
     }));
     document.getElementById('logoutBtn').addEventListener('click', async () => {
@@ -1341,6 +1326,50 @@
     });
   }
 
+  // 업장코드로 가입했지만 아직 관리자 승인 전
+  function renderPending() {
+    h(`
+      <div class="auth">
+        <img class="auth-logo" src="/icons/icon-192.png" alt="">
+        <h1>승인을 기다리고 있습니다</h1>
+        <p class="muted">업장 <b>${esc(user.workplace.code || user.workplace.hotelName)}</b>의 관리자가 가입을 승인하면 문서함과 재고를 이용할 수 있습니다.</p>
+        <div class="auth-form">
+          <button class="btn primary" id="pendingCheck">승인됐는지 다시 확인</button>
+          <button class="btn text" id="pendingLogout">로그아웃</button>
+          <button class="btn text danger" id="pendingCancel">가입 신청 취소 (탈퇴)</button>
+        </div>
+      </div>
+    `);
+    document.getElementById('pendingCheck').addEventListener('click', async () => {
+      user = await DB.refreshMe();
+      if (user.status === 'pending') return toast('아직 승인 전입니다');
+      await refreshBadge();
+      location.hash = '#/';
+    });
+    document.getElementById('pendingLogout').addEventListener('click', async () => {
+      await DB.logout();
+      user = null;
+      location.hash = '#/login';
+    });
+    document.getElementById('pendingCancel').addEventListener('click', async () => {
+      const p = dialog({
+        title: '가입 신청을 취소할까요?',
+        body: '<p>계정이 삭제됩니다.</p><label class="field"><span class="lbl">비밀번호 확인</span><input type="password" id="cancelPw" autocomplete="current-password"></label>',
+        actions: [{ label: '닫기', value: false }, { label: '가입 취소', value: true, cls: 'danger-fill' }],
+      });
+      const pw = document.getElementById('cancelPw');
+      pw.focus();
+      if (!(await p)) return;
+      try {
+        await DB.deleteAccount(pw.value);
+        user = null;
+        location.hash = '#/login';
+      } catch (ex) {
+        toast(ex.message);
+      }
+    });
+  }
+
   // ---------- 라우터 ----------
   async function route() {
     const [path, qs] = (location.hash.slice(1) || '/').split('?');
@@ -1351,8 +1380,11 @@
     // 최신 개인정보 고지에 동의하지 않은 회원(기존 회원·문구 변경)은 동의 화면부터
     if (user?.privacyConsentRequired && !['consent', 'privacy'].includes(parts[0])) return (location.hash = '#/consent');
     if (user && !user.privacyConsentRequired && parts[0] === 'consent') return (location.hash = '#/');
+    // 업장 관리자 승인 전에는 대기 화면만
+    if (user?.status === 'pending' && !user.privacyConsentRequired && !['pending', 'privacy'].includes(parts[0])) return (location.hash = '#/pending');
+    if (user && user.status !== 'pending' && parts[0] === 'pending') return (location.hash = '#/');
     if (parts[0] !== 'camera') stopCamera();
-    const fullscreen = ['camera', 'process', 'login', 'consent'].includes(parts[0]) || (parts[0] === 'privacy' && !user);
+    const fullscreen = ['camera', 'process', 'login', 'consent', 'pending'].includes(parts[0]) || (parts[0] === 'privacy' && !user);
     $tabbar.hidden = fullscreen;
     document.body.classList.toggle('fullscreen', fullscreen);
     $tabbar.querySelectorAll('[data-tab]').forEach((a) => a.classList.toggle('on', a.dataset.tab === (parts[0] || 'home')));
@@ -1361,6 +1393,7 @@
       case 'login': return renderLogin(params);
       case 'privacy': return renderPrivacy();
       case 'consent': return renderConsent();
+      case 'pending': return renderPending();
       case 'me': return renderMe();
       case 'camera': return renderCamera(params);
       case 'process': return renderProcess(parts[1]);
@@ -1392,7 +1425,7 @@
       }
       user = null;
     }
-    if (user && !user.privacyConsentRequired) { // 동의 전에는 문서 API를 쓸 수 없다
+    if (user && !user.privacyConsentRequired && user.status !== 'pending') { // 동의 전·승인 전에는 문서 API를 쓸 수 없다
       // 인식 도중 앱이 닫힌 지 10분 넘은 문서는 재촬영 대상으로 돌린다
       const stale = Date.now() - 10 * 60_000;
       for (const { doc } of await DB.listDocuments()) {

@@ -364,6 +364,19 @@ END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS documents_record_deletion_trg ON documents;
 CREATE TRIGGER documents_record_deletion_trg AFTER DELETE ON documents FOR EACH ROW EXECUTE FUNCTION documents_record_deletion();
 
+-- ================================================================
+-- 업장코드 가입: 가입 코드 대신 업장코드(수기 입력)로 업장을 찾는다.
+-- 처음 쓰는 코드면 업장을 새로 만들고, 이미 있으면 그 업장에 '승인 대기'로 합류한다
+-- ================================================================
+ALTER TABLE workplaces ADD COLUMN IF NOT EXISTS code text;   -- 업장코드 (관리자가 내 정보에서 수정)
+ALTER TABLE workplaces ADD COLUMN IF NOT EXISTS code_key text GENERATED ALWAYS AS (upper(regexp_replace(code, '\s', '', 'g'))) STORED;
+CREATE UNIQUE INDEX IF NOT EXISTS workplaces_code_key_idx ON workplaces (code_key) WHERE code_key IS NOT NULL;
+-- active: 이용 가능 / pending: 관리자 승인 대기 (문서·재고 등 업장 데이터 접근 불가)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'pending'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- 회원이 탈퇴해도 업장 문서는 업장 자료이므로 남긴다 (올린 사람만 비움)
 ALTER TABLE documents ALTER COLUMN user_id DROP NOT NULL;
 DO $$ BEGIN
