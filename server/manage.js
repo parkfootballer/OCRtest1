@@ -6,7 +6,8 @@
 //   node --env-file=.env manage.js db-user-add <이름> [--read-only]  팀원 DB 계정 발급 (조회·수정, 또는 조회만)
 //   node --env-file=.env manage.js db-user-remove <이름>             팀원 DB 계정 삭제
 //   node --env-file=.env manage.js db-users                          팀원 DB 계정 목록
-//   node --env-file=.env manage.js api-client-add <이름>             외부 연동 API 키 발급 (예: hso)
+//   node --env-file=.env manage.js api-client-add <이름> [--all]     외부 연동 API 키 발급 (예: hso). --all: 지점 연결 없이 모든 업장
+//   node --env-file=.env manage.js api-client-scope <이름> all|mapped 범위 변경 (모든 업장 / 연결한 지점만)
 //   node --env-file=.env manage.js api-client-map <이름> <업장 id> <지점 코드>   업장 ↔ 상대 지점 연결
 //   node --env-file=.env manage.js api-client-unmap <이름> <지점 코드>
 //   node --env-file=.env manage.js api-client-rotate <이름>          키 재발급 (기존 키 즉시 무효)
@@ -165,10 +166,21 @@ async function issue(workplaceId, days, uses) {
     case 'api-client-add': {
       const name = String(args[0] || '').toLowerCase();
       if (!/^[a-z][a-z0-9_-]{1,30}$/.test(name)) throw new Error('이름은 영문 소문자로 시작하는 2~31자 (예: hso)');
+      const all = args.includes('--all');
       const key = newApiKey();
-      await pool.query('INSERT INTO api_clients (name, key_hash, key_prefix) VALUES ($1, $2, $3)', [name, keyHash(key), key.slice(0, 12)]);
-      console.log(`연동 생성: ${name}. 이어서 api-client-map 으로 업장과 지점 코드를 연결하세요`);
+      await pool.query('INSERT INTO api_clients (name, key_hash, key_prefix, all_workplaces) VALUES ($1, $2, $3, $4)',
+        [name, keyHash(key), key.slice(0, 12), all]);
+      console.log(all
+        ? `연동 생성: ${name} — 모든 업장(앞으로 생길 업장 포함) 조회 가능. 지점 코드 연결은 선택 사항입니다`
+        : `연동 생성: ${name}. 이어서 api-client-map 으로 업장과 지점 코드를 연결하세요`);
       printKey(key);
+      break;
+    }
+    case 'api-client-scope': {
+      const c = await apiClient(args[0]);
+      if (!['all', 'mapped'].includes(args[1])) throw new Error('사용법: api-client-scope <이름> all|mapped');
+      await pool.query('UPDATE api_clients SET all_workplaces = $1 WHERE id = $2', [args[1] === 'all', c.id]);
+      console.log(args[1] === 'all' ? `${c.name}: 모든 업장 조회로 바꿨습니다` : `${c.name}: 지점 코드로 연결한 업장만 조회로 바꿨습니다`);
       break;
     }
     case 'api-client-rotate': {
@@ -207,18 +219,18 @@ async function issue(workplaceId, days, uses) {
     }
     case 'api-clients': {
       const { rows } = await pool.query(
-        `SELECT c.name, c.key_prefix, c.active, c.last_used_at, m.branch_code, w.hotel_name, w.name AS workplace
+        `SELECT c.name, c.key_prefix, c.active, c.all_workplaces, c.last_used_at, m.branch_code, w.hotel_name, w.name AS workplace
            FROM api_clients c LEFT JOIN api_client_workplaces m ON m.client_id = c.id LEFT JOIN workplaces w ON w.id = m.workplace_id
           ORDER BY c.name, m.branch_code`,
       );
       console.table(rows.map((r) => ({
-        연동: r.name, 키: `${r.key_prefix}…`, 상태: r.active ? '사용' : '중지', 마지막호출: r.last_used_at?.toISOString() || '-',
+        연동: r.name, 키: `${r.key_prefix}…`, 상태: r.active ? '사용' : '중지', 범위: r.all_workplaces ? '모든 업장' : '연결한 지점만', 마지막호출: r.last_used_at?.toISOString() || '-',
         지점코드: r.branch_code || '-', 업장: r.workplace ? `${r.hotel_name} · ${r.workplace}` : '-',
       })));
       break;
     }
     default:
       console.log('명령: workplaces | create-workplace | issue-code | make-admin | db-user-add | db-user-remove | db-users | '
-        + 'api-client-add | api-client-map | api-client-unmap | api-client-rotate | api-client-revoke | api-clients');
+        + 'api-client-add | api-client-scope | api-client-map | api-client-unmap | api-client-rotate | api-client-revoke | api-clients');
   }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => pool.end());

@@ -1,6 +1,8 @@
 // 외부 연동 읽기 전용 API (/api/ext/v1) — HSO 등 다른 시스템이 업장별 청구·거래 자료를 가져간다.
 // - 인증: 연동 시스템마다 발급한 API 키 (Authorization: Bearer chk_…)
-// - 범위: 그 시스템에 매핑된 업장(= 상대의 지점 코드)의 문서만
+// - 범위: 그 시스템에 매핑된 업장(= 상대의 지점 코드)의 문서만.
+//         단, 키에 "전체 업장 허용"(all_workplaces)이 켜져 있으면 모든 업장 — 지점은 workplaceId로 구분
+//         (지점 코드를 연결해 둔 업장은 branchCode도 함께 나간다)
 // - 읽기 전용: GET만 있다. 이미지·OCR 원문·개인 식별 정보(고객명 등)는 내주지 않는다
 // - 청구 확인 ≠ 납부 완료: paymentStatus는 항상 'unknown'. 실제 출금 내역과 합산하지 않도록 문서에 명시
 // - 중복 등록된 사본은 기본으로 빼서 이중 합산을 막는다
@@ -41,7 +43,8 @@ const US = (col) => `to_char(${col} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS
 function toDocument(r, withItems) {
   const out = {
     id: r.id,
-    branchCode: r.branch_code,
+    workplaceId: r.workplace_id, // 업장(지점) 고유 id — 바뀌지 않음. 지점 코드가 없을 때 지점 구분용
+    branchCode: r.branch_code,   // 연결된 지점 코드 (전체 허용 키에서 연결 안 된 업장은 null)
     workplace: { hotelName: r.hotel_name, name: r.workplace_name },
     documentType: r.document_type,
     documentTypeLabel: TYPE_LABELS[r.document_type] || r.document_type,
@@ -75,15 +78,17 @@ function toDocument(r, withItems) {
 
 const DOC_SELECT = `
   SELECT d.id, d.document_type, d.status, d.verified_by, d.verified_at, d.created_at, ${US('d.updated_at')} AS updated_at_us,
-         d.duplicate_decision, d.duplicate_of,
+         d.duplicate_decision, d.duplicate_of, d.workplace_id,
          m.branch_code, w.hotel_name, w.name AS workplace_name,
          e.vendor_name, e.business_number, e.document_number, e.issue_date, e.due_date, e.billing_month,
          e.total_amount, e.tax_amount,
          (SELECT count(*)::int FROM line_items l WHERE l.extracted_data_id = e.id) AS item_count
     FROM documents d
-    JOIN api_client_workplaces m ON m.workplace_id = d.workplace_id AND m.client_id = $1
+    LEFT JOIN api_client_workplaces m ON m.workplace_id = d.workplace_id AND m.client_id = $1
     JOIN workplaces w ON w.id = d.workplace_id
     LEFT JOIN extracted_data e ON e.document_id = d.id`;
+// 이 키가 볼 수 있는 업장 조건 (m = 지점 연결). all_workplaces는 DB에서 읽은 값이라 SQL에 그대로 넣어도 안전
+const scope = (client) => (client.all_workplaces ? 'TRUE' : 'm.client_id IS NOT NULL');
 
 module.exports = function partnerRouter({ pool, onAudit }) {
   const r = express.Router();
@@ -94,7 +99,7 @@ module.exports = function partnerRouter({ pool, onAudit }) {
     try {
       const m = /^Bearer\s+(chk_[A-Za-z0-9_-]{20,})$/.exec(req.headers.authorization || '');
       if (!m) throw new ApiError(401, 'unauthorized', 'Authorization: Bearer <API 키> 헤더가 필요합니다');
-      const { rows: [client] } = await pool.query('SELECT id, name, active FROM api_clients WHERE key_hash = $1', [sha256(m[1])]);
+      const { rows: [client] } = await pool.query('SELECT id, name, active, all_workplaces FROM api_clients WHERE key_hash = $1', [sha256(m[1])]);
       if (!client || !client.active) throw new ApiError(401, 'unauthorized', 'API 키가 올바르지 않거나 중지되었습니다');
       const now = Date.now();
       const h = hits.get(client.id);
@@ -117,11 +122,16 @@ module.exports = function partnerRouter({ pool, onAudit }) {
   r.get('/branches', wrap(async (req, res) => {
     res.locals.audit = { action: 'partner.branches' };
     const { rows } = await pool.query(
-      `SELECT m.branch_code, w.hotel_name, w.name FROM api_client_workplaces m JOIN workplaces w ON w.id = m.workplace_id
-        WHERE m.client_id = $1 ORDER BY m.branch_code`,
+      `SELECT w.id, m.branch_code, w.hotel_name, w.name FROM workplaces w
+         LEFT JOIN api_client_workplaces m ON m.workplace_id = w.id AND m.client_id = $1
+        WHERE ${scope(req.client)} ORDER BY w.hotel_name, w.name`,
       [req.client.id],
     );
-    res.json({ client: req.client.name, branches: rows.map((x) => ({ branchCode: x.branch_code, hotelName: x.hotel_name, workplaceName: x.name })) });
+    res.json({
+      client: req.client.name,
+      scope: req.client.all_workplaces ? 'all' : 'mapped', // all: 모든 업장 / mapped: 연결한 지점만
+      branches: rows.map((x) => ({ workplaceId: x.id, branchCode: x.branch_code, hotelName: x.hotel_name, workplaceName: x.name })),
+    });
   }));
 
   // 문서 목록 (증분 동기화): 변경 시각 오름차순 + 커서
@@ -130,9 +140,13 @@ module.exports = function partnerRouter({ pool, onAudit }) {
     const q = req.query;
     const limit = Math.min(200, Math.max(1, Number(q.limit) || 100));
     const params = [req.client.id];
-    const where = [`d.status <> 'processing'`]; // 인식 중인 문서는 아직 값이 없다
+    const where = [scope(req.client), `d.status <> 'processing'`]; // 인식 중인 문서는 아직 값이 없다
     const add = (sql, v) => { params.push(v); where.push(sql.replace('?', `$${params.length}`)); };
     if (q.branch) add('m.branch_code = ?', String(q.branch));
+    if (q.workplace) {
+      if (!isUuid(q.workplace)) throw new ApiError(400, 'invalid_parameter', 'workplace는 업장 id(UUID)');
+      add('d.workplace_id = ?', q.workplace);
+    }
     if (q.status) {
       if (!['confirmed', 'unconfirmed'].includes(q.status)) throw new ApiError(400, 'invalid_parameter', 'status는 confirmed 또는 unconfirmed');
       where.push(q.status === 'confirmed' ? `d.status = 'verified'` : `d.status IN ('needs_review', 'needs_retake')`);
@@ -170,7 +184,9 @@ module.exports = function partnerRouter({ pool, onAudit }) {
   r.get('/documents/:id', wrap(async (req, res) => {
     res.locals.audit = { action: 'partner.documents.view', targetId: req.params.id };
     if (!isUuid(req.params.id)) throw new ApiError(404, 'not_found', '문서를 찾을 수 없습니다');
-    const { rows: [doc] } = await pool.query(`${DOC_SELECT} WHERE d.id = $2 AND d.status <> 'processing'`, [req.client.id, req.params.id]);
+    const { rows: [doc] } = await pool.query(
+      `${DOC_SELECT} WHERE ${scope(req.client)} AND d.id = $2 AND d.status <> 'processing'`, [req.client.id, req.params.id],
+    );
     if (!doc) throw new ApiError(404, 'not_found', '문서를 찾을 수 없습니다');
     doc.items = (await pool.query(
       `SELECT l.* FROM line_items l JOIN extracted_data e ON e.id = l.extracted_data_id WHERE e.document_id = $1 ORDER BY l.line_no`,
@@ -184,11 +200,12 @@ module.exports = function partnerRouter({ pool, onAudit }) {
     res.locals.audit = { action: 'partner.deleted.list' };
     const since = parseTime(req.query.since, 'since');
     const params = [req.client.id];
-    let sql = `SELECT x.document_id, ${US('x.deleted_at')} AS deleted_at, m.branch_code FROM document_deletions x
-                 JOIN api_client_workplaces m ON m.workplace_id = x.workplace_id AND m.client_id = $1`;
-    if (since) { params.push(since); sql += ` WHERE x.deleted_at > $2`; }
-    const { rows } = await pool.query(`${sql} ORDER BY 2 LIMIT 1000`, params);
-    res.json({ data: rows.map((x) => ({ id: x.document_id, branchCode: x.branch_code, deletedAt: x.deleted_at })) });
+    let sql = `SELECT x.document_id, x.workplace_id, ${US('x.deleted_at')} AS deleted_at, m.branch_code FROM document_deletions x
+                 LEFT JOIN api_client_workplaces m ON m.workplace_id = x.workplace_id AND m.client_id = $1
+                WHERE ${scope(req.client)}`;
+    if (since) { params.push(since); sql += ` AND x.deleted_at > $2`; }
+    const { rows } = await pool.query(`${sql} ORDER BY 3 LIMIT 1000`, params);
+    res.json({ data: rows.map((x) => ({ id: x.document_id, workplaceId: x.workplace_id, branchCode: x.branch_code, deletedAt: x.deleted_at })) });
   }));
 
   r.use((req, res, next) => next(new ApiError(404, 'not_found', '없는 API입니다')));

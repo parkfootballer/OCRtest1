@@ -14,17 +14,19 @@ HSO 등 다른 시스템이 찰칵장부에 등록·검수된 **지점별 청구
 | 인증 | `Authorization: Bearer <API 키>` (키는 `chk_`로 시작) |
 | 형식 | JSON, UTF-8, 시각은 ISO 8601(UTC), 금액은 원 단위 정수. `updatedAt`·`deletedAt`·`syncedUntil`은 마이크로초까지 오므로 **문자열 그대로 저장해 다시 넘기세요** (날짜 타입으로 바꾸면 잘려서 같은 건이 다시 올 수 있음) |
 | 호출 제한 | 키당 분당 300회 (넘으면 `429`) |
-| 범위 | 이 키에 연결된 지점(업장)의 문서만 |
+| 범위 | 키마다 둘 중 하나: **모든 업장**(`scope: all`) 또는 **연결한 지점만**(`scope: mapped`). `GET /branches`로 확인 |
+| 지점 구분 | 모든 문서에 `workplaceId`(업장 고유 id, 바뀌지 않음)가 붙습니다. 지점 코드를 연결한 업장은 `branchCode`도 붙습니다 |
 
 API 키와 지점 연결은 찰칵장부 운영자가 발급합니다(아래 7장). 키는 비밀번호처럼 다루고, 서버 환경변수 등 안전한 곳에만 두세요.
 
 ## 2. 엔드포인트
 
-### `GET /branches` — 연결 확인 · 내 지점 목록
+### `GET /branches` — 연결 확인 · 조회 가능한 업장(지점) 목록
 ```json
-{ "client": "hso",
-  "branches": [ { "branchCode": "HS-001", "hotelName": "그랜드호텔", "workplaceName": "객실관리팀" } ] }
+{ "client": "hso", "scope": "all",
+  "branches": [ { "workplaceId": "1f0c…", "branchCode": null, "hotelName": "그랜드호텔", "workplaceName": "객실관리팀" } ] }
 ```
+모든 업장 범위의 키는 새 업장이 생기면 자동으로 목록에 추가됩니다. 주기적으로 받아 상대 시스템의 지점과 맞춰 두세요.
 
 ### `GET /documents` — 문서 목록 (증분 동기화)
 변경 시각(`updatedAt`) 오름차순으로 돌려줍니다.
@@ -34,7 +36,8 @@ API 키와 지점 연결은 찰칵장부 운영자가 발급합니다(아래 7�
 | `updatedSince` | 이 시각 **이후에 바뀐** 문서만 (ISO 8601). 증분 동기화에 사용 |
 | `cursor` | 다음 페이지 (이전 응답의 `nextCursor`) |
 | `limit` | 페이지 크기 1~200 (기본 100) |
-| `branch` | 지점 코드 하나로 제한 |
+| `workplace` | 업장 id(`workplaceId`) 하나로 제한 |
+| `branch` | 지점 코드 하나로 제한 (지점 코드를 연결한 업장만) |
 | `status` | `confirmed`(확인) 또는 `unconfirmed`(미확인) |
 | `type` | `giro`,`bill`,`invoice`,`tax_invoice` (쉼표로 여러 개) |
 | `includeDuplicates` | `true`면 "중복으로 등록"된 사본도 포함 (기본: 제외) |
@@ -57,7 +60,7 @@ API 키와 지점 연결은 찰칵장부 운영자가 발급합니다(아래 7�
 ### `GET /deleted-documents?since=…` — 삭제된 문서
 찰칵장부에서 지운 문서의 id입니다. 받아 간 쪽에서도 지워 주세요. **90일**만 보관하므로 그보다 자주 확인하세요.
 ```json
-{ "data": [ { "id": "…", "branchCode": "HS-001", "deletedAt": "2026-10-30T03:00:00Z" } ] }
+{ "data": [ { "id": "…", "workplaceId": "1f0c…", "branchCode": null, "deletedAt": "2026-10-30T03:00:00.123456Z" } ] }
 ```
 
 ## 3. 문서 필드
@@ -65,7 +68,8 @@ API 키와 지점 연결은 찰칵장부 운영자가 발급합니다(아래 7�
 | 필드 | 설명 |
 |---|---|
 | `id` | 문서 id (UUID, 바뀌지 않음) — 상대 시스템의 중복 방지 키로 쓰세요 |
-| `branchCode` | 상대 시스템의 지점 코드 |
+| `workplaceId` | 업장(지점) 고유 id — 지점 구분에 쓰세요 |
+| `branchCode` | 연결된 상대 시스템의 지점 코드 (연결하지 않았으면 `null`) |
 | `documentType` / `documentTypeLabel` | `giro` 지로, `bill` 고지서, `invoice` 거래명세서, `tax_invoice` 세금계산서 |
 | `reviewStatus` | `confirmed` 확인(사람 검수 또는 자동 확정) / `unconfirmed` 미확인(검수 대기·재촬영 필요) |
 | `confirmedAt`, `confirmedBy` | 확인 시각, `human`(사람) / `auto`(모든 대조 항목이 맞아 자동 확정) |
@@ -111,9 +115,11 @@ curl -H "Authorization: Bearer $CHALKAK_API_KEY" "https://<서버>/api/ext/v1/do
 ## 7. 운영자용: 키 발급·지점 연결 (`server/manage.js`)
 운영 DB에 대해 실행할 때는 `DATABASE_URL`에 Render의 External Database URL, `DB_SSL=true`를 줍니다.
 ```bash
-node --env-file=.env manage.js api-client-add hso                 # 키 발급 (한 번만 표시)
+node --env-file=.env manage.js api-client-add hso --all           # 키 발급: 모든 업장 (한 번만 표시)
+node --env-file=.env manage.js api-client-add hso                 # 키 발급: 연결한 지점만
+node --env-file=.env manage.js api-client-scope hso mapped        # 범위 변경 (all | mapped)
 node --env-file=.env manage.js workplaces                         # 업장 id 확인
-node --env-file=.env manage.js api-client-map hso <업장 id> HS-001  # 업장 ↔ 지점 코드
+node --env-file=.env manage.js api-client-map hso <업장 id> HS-001  # 업장 ↔ 지점 코드 (모든 업장 키에선 선택)
 node --env-file=.env manage.js api-clients                        # 연동·매핑·마지막 호출 확인
 node --env-file=.env manage.js api-client-rotate hso              # 키 유출 의심 시 재발급
 node --env-file=.env manage.js api-client-revoke hso              # 연동 중지

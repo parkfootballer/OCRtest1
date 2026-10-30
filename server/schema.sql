@@ -314,7 +314,9 @@ CREATE TABLE IF NOT EXISTS api_clients (
   created_at    timestamptz NOT NULL DEFAULT now(),
   last_used_at  timestamptz
 );
--- 업장 ↔ 상대 시스템의 지점 코드. 매핑된 업장의 문서만 내준다
+-- true면 지점 코드 연결 없이 모든 업장(앞으로 생길 업장 포함)의 문서를 내준다
+ALTER TABLE api_clients ADD COLUMN IF NOT EXISTS all_workplaces boolean NOT NULL DEFAULT false;
+-- 업장 ↔ 상대 시스템의 지점 코드. 매핑된 업장의 문서만 내준다 (all_workplaces면 코드는 선택 사항)
 CREATE TABLE IF NOT EXISTS api_client_workplaces (
   client_id     uuid NOT NULL REFERENCES api_clients(id) ON DELETE CASCADE,
   workplace_id  uuid NOT NULL REFERENCES workplaces(id) ON DELETE CASCADE,
