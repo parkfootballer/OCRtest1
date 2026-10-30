@@ -167,7 +167,8 @@ function requireConsent(req, res, next) {
 }
 // 승인 대기 회원은 업장 데이터(문서·재고 등)를 볼 수 없다. 내 정보 확인·동의·탈퇴만 가능
 function requireActive(req, res, next) {
-  if (req.user.status === 'active' || CONSENT_FREE.includes(`${req.method} ${req.baseUrl}${req.path}`)) return next();
+  // 운영자는 자기 업장이 대기 중이어도 막지 않는다 (업장 개설을 승인할 사람이 막히면 아무도 승인할 수 없다)
+  if (req.user.status === 'active' || req.user.isOperator || CONSENT_FREE.includes(`${req.method} ${req.baseUrl}${req.path}`)) return next();
   next(new HttpError(403, '업장 관리자의 승인을 기다리고 있습니다'));
 }
 // 업장코드 정규화: 공백 제거·대문자 (DB의 workplaces.code_key와 같은 규칙)
@@ -550,11 +551,13 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
     //  - 이미 있는 코드 → 그 업장에 승인 대기로 합류 (업장 관리자가 승인)
     // 운영자 승인을 거치게 해, 아무나 실제 지점 코드를 먼저 차지해 직원 데이터를 받아 보는 것을 막는다.
     // 동시에 같은 새 코드로 가입해도 업장은 하나만 생기도록 INSERT … ON CONFLICT 로 처리
+    // 운영자 이메일로 가입하면 승인 없이 바로 이용 (승인하는 사람이 대기에 걸리지 않게)
+    const operator = OPERATOR_EMAILS.includes(mail);
     let role = 'admin';
-    let status = 'pending';
+    const status = operator ? 'active' : 'pending';
     let { rows: [wp] } = await c.query(
-      `INSERT INTO workplaces (hotel_name, name, code, status) VALUES ($1, $2, $1, 'pending') ON CONFLICT DO NOTHING RETURNING id`,
-      [code, wpName],
+      `INSERT INTO workplaces (hotel_name, name, code, status) VALUES ($1, $2, $1, $3) ON CONFLICT DO NOTHING RETURNING id`,
+      [code, wpName, operator ? 'active' : 'pending'],
     );
     if (!wp) {
       ({ rows: [wp] } = await c.query('SELECT id FROM workplaces WHERE code_key = $1', [codeKey(code)]));
@@ -1151,6 +1154,10 @@ async function purgeExpired() {
   app.listen(PORT, () => {
     console.log(`찰칵장부 서버: http://localhost:${PORT}`);
     console.log(sms.describe()); // 호스팅에 넣은 문자 설정이 실제로 어떻게 읽혔는지 (비밀값은 길이만)
+    // 운영자 설정 확인용 (이메일은 앞 3글자만)
+    console.log(OPERATOR_EMAILS.length
+      ? `운영자: ${OPERATOR_EMAILS.length}명 (${OPERATOR_EMAILS.map((e) => { const [u, d = ''] = e.split('@'); return `${u.slice(0, 3)}***@${d}`; }).join(', ')})`
+      : '운영자: 없음 — OPERATOR_EMAILS 미설정. 새 업장 개설은 manage.js workplace-approve 로만 승인할 수 있습니다');
   });
 })().catch((e) => {
   console.error('서버 시작 실패:', e.message);

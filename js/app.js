@@ -1067,7 +1067,7 @@
           ? await DB.signup({ email: f.email, password: f.password, name: f.name, workplaceCode: f.workplaceCode, phone: verifiedPhone, phoneToken, consents: { privacy: Policy.PRIVACY_VERSION } })
           : await DB.login(f.email, f.password);
         if (user.privacyConsentRequired) return (location.hash = '#/consent');
-        if (user.status === 'pending') return (location.hash = '#/pending');
+        if (user.status === 'pending' && !user.isOperator) return (location.hash = '#/pending');
         await refreshBadge();
         location.hash = '#/';
       } catch (ex) {
@@ -1115,17 +1115,6 @@
           </details>` : ''}
         </section>
 
-        ${isAdmin ? `
-        <section class="card">
-          <div class="card-h"><h2>가입 승인</h2>${pending.length ? `<span class="badge st-review">대기 ${pending.length}명</span>` : ''}</div>
-          <p class="muted">업장코드 <b>${esc(user.workplace.code || '(미정)')}</b>로 가입한 사람은 승인해야 문서·재고를 볼 수 있습니다. 모르는 사람은 거절하세요.</p>
-          <ul class="pending-list">${pending.map((m) => `
-            <li><span><b>${esc(m.name)}</b><small>${esc(m.email)}${m.phone ? ` · ${esc(fmtPhone(m.phone))}` : ''} · ${dateLabel(m.createdAt)} 가입</small></span>
-              <button class="ghost sm" data-approve="${m.id}">승인</button>
-              <button class="ghost sm danger-text" data-reject="${m.id}" data-name="${esc(m.name)}">거절</button></li>`).join('')
-            || '<li class="muted">승인을 기다리는 사람이 없습니다.</li>'}</ul>
-        </section>
-
         ${user.isOperator ? `
         <section class="card">
           <div class="card-h"><h2>업장 개설 승인 (운영자)</h2>${newWorkplaces.length ? `<span class="badge st-review">대기 ${newWorkplaces.length}곳</span>` : ''}</div>
@@ -1137,6 +1126,17 @@
               <button class="ghost sm danger-text" data-wp-reject="${w.id}" data-code="${esc(w.code)}">거절</button></li>`).join('')
             || '<li class="muted">개설 대기 중인 업장이 없습니다.</li>'}</ul>
         </section>` : ''}
+
+        ${isAdmin ? `
+        <section class="card">
+          <div class="card-h"><h2>가입 승인</h2>${pending.length ? `<span class="badge st-review">대기 ${pending.length}명</span>` : ''}</div>
+          <p class="muted">업장코드 <b>${esc(user.workplace.code || '(미정)')}</b>로 가입한 사람은 승인해야 문서·재고를 볼 수 있습니다. 모르는 사람은 거절하세요.</p>
+          <ul class="pending-list">${pending.map((m) => `
+            <li><span><b>${esc(m.name)}</b><small>${esc(m.email)}${m.phone ? ` · ${esc(fmtPhone(m.phone))}` : ''} · ${dateLabel(m.createdAt)} 가입</small></span>
+              <button class="ghost sm" data-approve="${m.id}">승인</button>
+              <button class="ghost sm danger-text" data-reject="${m.id}" data-name="${esc(m.name)}">거절</button></li>`).join('')
+            || '<li class="muted">승인을 기다리는 사람이 없습니다.</li>'}</ul>
+        </section>
 
         <section class="card">
           <div class="card-h"><h2>OCR 개선 데이터 활용</h2><span class="badge ${wp.trainingConsent ? 'st-ok' : 'st-proc'}">${wp.trainingConsent ? '동의함' : '동의 안 함'}</span></div>
@@ -1415,8 +1415,10 @@
     if (user?.privacyConsentRequired && !['consent', 'privacy'].includes(parts[0])) return (location.hash = '#/consent');
     if (user && !user.privacyConsentRequired && parts[0] === 'consent') return (location.hash = '#/');
     // 업장 관리자 승인 전에는 대기 화면만
-    if (user?.status === 'pending' && !user.privacyConsentRequired && !['pending', 'privacy'].includes(parts[0])) return (location.hash = '#/pending');
-    if (user && user.status !== 'pending' && parts[0] === 'pending') return (location.hash = '#/');
+    // (운영자는 대기 중이어도 업장 개설 승인을 해야 하므로 막지 않는다)
+    const waiting = user?.status === 'pending' && !user.isOperator;
+    if (waiting && !user.privacyConsentRequired && !['pending', 'privacy'].includes(parts[0])) return (location.hash = '#/pending');
+    if (user && !waiting && parts[0] === 'pending') return (location.hash = '#/');
     if (parts[0] !== 'camera') stopCamera();
     const fullscreen = ['camera', 'process', 'login', 'consent', 'pending'].includes(parts[0]) || (parts[0] === 'privacy' && !user);
     $tabbar.hidden = fullscreen;
@@ -1461,7 +1463,7 @@
       }
       user = null;
     }
-    if (user && !user.privacyConsentRequired && user.status !== 'pending') { // 동의 전·승인 전에는 문서 API를 쓸 수 없다
+    if (user && !user.privacyConsentRequired && (user.status !== 'pending' || user.isOperator)) { // 동의 전·승인 전에는 문서 API를 쓸 수 없다
       // 인식 도중 앱이 닫힌 지 10분 넘은 문서는 재촬영 대상으로 돌린다
       const stale = Date.now() - 10 * 60_000;
       for (const { doc } of await DB.listDocuments()) {
